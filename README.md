@@ -26,7 +26,7 @@ Tico is a native macOS sticky-note app for keeping notes and tasks close at hand
 
 ## 安装 Installation
 
-如果仓库已有可下载的构建，请在 [GitHub Releases](https://github.com/code-wgl/Tico/releases) 查看对应版本及安装说明。也可以按下方步骤从源码构建。
+下载 [Tico 1.0.11 安装映像](https://github.com/code-wgl/Tico/releases/download/v1.0.11/Tico-v1.0.11.dmg)，打开后将 Tico 拖入 Applications 文件夹。也可以在 [GitHub Releases](https://github.com/code-wgl/Tico/releases) 查看其他下载文件和发行说明，或按下方步骤从源码构建。
 
 本项目的本地打包脚本使用 ad-hoc 签名；这种签名不等同于 Apple Developer ID 签名或公证，其他 Mac 的首次打开体验可能受到 macOS 安全设置影响。
 
