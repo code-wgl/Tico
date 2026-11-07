@@ -82,7 +82,10 @@ extension AppDatabase {
             }
             for image in archive.taskImages {
                 guard let id = taskIDs[image.taskId] else { throw NoteArchiveError.invalid }
-                try db.execute(sql: "INSERT INTO taskImage (taskId,data,cropX,cropY,cropW,cropH,updatedAt) VALUES (?,?,?,?,?,?,?)", arguments: [id, image.data, image.cropX, image.cropY, image.cropW, image.cropH, Date()])
+                try db.execute(
+                    sql: "INSERT INTO taskImage (taskId,data,cropX,cropY,cropW,cropH,updatedAt) VALUES (?,?,?,?,?,?,?)",
+                    arguments: [id, image.data, image.cropX, image.cropY, image.cropW, image.cropH, Date()]
+                )
             }
             return note
         }

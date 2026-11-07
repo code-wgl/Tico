@@ -32,7 +32,10 @@ final class ReminderScheduler {
             let requests = await center.pendingNotificationRequests()
             let old = requests.filter { $0.identifier.hasPrefix(prefix) }
             var desired: [String: (Date, String, UUID)] = [:]
-            let regex = try! NSRegularExpression(pattern: #"⏰\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})"#)
+            guard let regex = try? NSRegularExpression(pattern: #"⏰\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})"#) else {
+                NSLog("[Tic] invalid reminder expression")
+                return
+            }
             let formatter = Self.formatter()
             for note in notes {
                 var inCode = false

@@ -38,7 +38,11 @@ enum NotePortableFormat {
         if format == .text {
             markdown = markdown.replacingOccurrences(of: #"!\[[^\]\n]*\]\(tic-omitted-image\)"#, with: "[图片]", options: .regularExpression)
             // Text exports keep the words without exposing the editor's HTML style markup.
-            if let spans = try? NSRegularExpression(pattern: #"<span style=\"(?:color:(?:#[0-9a-fA-F]{6}|inherit)|font-family:[^\"<>;]+(?:;font-size:[0-9]{1,3}px)?(?:;font-weight:(?:bold|normal))?(?:;font-style:(?:italic|normal))?|font-size:[0-9]{1,3}px)\">(.*?)</span>"#, options: [.dotMatchesLineSeparators]) {
+            let spanPattern = #"<span style=\"(?:color:(?:#[0-9a-fA-F]{6}|inherit)|"#
+                + #"font-family:[^\"<>;]+(?:;font-size:[0-9]{1,3}px)?"#
+                + #"(?:;font-weight:(?:bold|normal))?(?:;font-style:(?:italic|normal))?|"#
+                + #"font-size:[0-9]{1,3}px)\">(.*?)</span>"#
+            if let spans = try? NSRegularExpression(pattern: spanPattern, options: [.dotMatchesLineSeparators]) {
                 while true {
                     let result = spans.stringByReplacingMatches(in: markdown, range: NSRange(location: 0, length: (markdown as NSString).length), withTemplate: "$1")
                     if result == markdown { break }
