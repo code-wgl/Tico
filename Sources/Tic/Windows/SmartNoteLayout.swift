@@ -107,13 +107,12 @@ enum SmartNoteLayout {
                             let usedArea = frames.reduce(CGFloat.zero) { $0 + $1.width * $1.height }
                             let emptyHeight = max(0, width * height - usedArea) / width
                             var score = movement + emptyHeight * 1.5 + (gap == 4 ? 20 : 0)
-                            // Snap only when the selected group was already close to an edge or centre.
-                            if abs(originalBounds.minX - screen.minX) < 48 && abs(x - screen.minX) < 1 { score -= 24 }
-                            else if abs(originalBounds.maxX - screen.maxX) < 48 && abs(x + width - screen.maxX) < 1 { score -= 24 }
-                            else if abs(originalBounds.midX - screen.midX) < 40 && abs(x + width / 2 - screen.midX) < 1 { score -= 14 }
-                            if abs(originalBounds.minY - screen.minY) < 48 && abs(y - screen.minY) < 1 { score -= 24 }
-                            else if abs(originalBounds.maxY - screen.maxY) < 48 && abs(y + height - screen.maxY) < 1 { score -= 24 }
-                            else if abs(originalBounds.midY - screen.midY) < 40 && abs(y + height / 2 - screen.midY) < 1 { score -= 14 }
+                            score -= snapDiscount(originalMin: originalBounds.minX, originalMid: originalBounds.midX,
+                                                  originalMax: originalBounds.maxX, screenMin: screen.minX,
+                                                  screenMid: screen.midX, screenMax: screen.maxX, placedMin: x, length: width)
+                            score -= snapDiscount(originalMin: originalBounds.minY, originalMid: originalBounds.midY,
+                                                  originalMax: originalBounds.maxY, screenMin: screen.minY,
+                                                  screenMid: screen.midY, screenMax: screen.maxY, placedMin: y, length: height)
                             if score < bestScore { bestScore = score; best = placed }
                         }
                     }
@@ -121,5 +120,17 @@ enum SmartNoteLayout {
             }
         }
         return best
+    }
+
+    /// Snap only when the selected group was already close to an edge or centre.
+    private nonisolated static func snapDiscount(
+        originalMin: CGFloat, originalMid: CGFloat, originalMax: CGFloat,
+        screenMin: CGFloat, screenMid: CGFloat, screenMax: CGFloat,
+        placedMin: CGFloat, length: CGFloat
+    ) -> CGFloat {
+        if abs(originalMin - screenMin) < 48 && abs(placedMin - screenMin) < 1 { return 24 }
+        if abs(originalMax - screenMax) < 48 && abs(placedMin + length - screenMax) < 1 { return 24 }
+        if abs(originalMid - screenMid) < 40 && abs(placedMin + length / 2 - screenMid) < 1 { return 14 }
+        return 0
     }
 }

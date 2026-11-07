@@ -79,11 +79,18 @@ struct WindowMoveArea: NSViewRepresentable {
             if allowCompactResize { NSCursor.arrow.set() }
         }
 
-        private func compactEdges(at point: NSPoint) -> (left: Bool, right: Bool, bottom: Bool, top: Bool) {
+        private struct CompactEdges {
+            let left: Bool
+            let right: Bool
+            let bottom: Bool
+            let top: Bool
+        }
+
+        private func compactEdges(at point: NSPoint) -> CompactEdges {
             let vertical = min(6, max(2, bounds.height * 0.32))
             let horizontal = min(10, bounds.width / 4)
-            return (point.x <= horizontal, point.x >= bounds.width - horizontal,
-                    point.y <= vertical, point.y >= bounds.height - vertical)
+            return CompactEdges(left: point.x <= horizontal, right: point.x >= bounds.width - horizontal,
+                                bottom: point.y <= vertical, top: point.y >= bounds.height - vertical)
         }
 
         override func mouseDown(with event: NSEvent) {
@@ -100,8 +107,8 @@ struct WindowMoveArea: NSViewRepresentable {
 
         private func resizeCompactPanel(_ panel: NotePanel, from event: NSEvent) -> Bool {
             let point = convert(event.locationInWindow, from: nil)
-            let (left, right, bottom, top) = compactEdges(at: point)
-            guard left || right || bottom || top else { return false }
+            let edges = compactEdges(at: point)
+            guard edges.left || edges.right || edges.bottom || edges.top else { return false }
             let initial = panel.frame
             let mouse = NSEvent.mouseLocation
             while let next = panel.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
@@ -109,16 +116,16 @@ struct WindowMoveArea: NSViewRepresentable {
                 let now = NSEvent.mouseLocation
                 let dx = now.x - mouse.x, dy = now.y - mouse.y
                 var frame = initial
-                if left {
+                if edges.left {
                     frame.origin.x = min(initial.maxX - NoteLayout.minimumCollapsedWidth, initial.minX + dx)
                     frame.size.width = initial.maxX - frame.minX
-                } else if right {
+                } else if edges.right {
                     frame.size.width = max(NoteLayout.minimumCollapsedWidth, initial.width + dx)
                 }
-                if bottom {
+                if edges.bottom {
                     frame.origin.y = min(initial.maxY - NoteLayout.minimumCollapsedHeight, initial.minY + dy)
                     frame.size.height = initial.maxY - frame.minY
-                } else if top {
+                } else if edges.top {
                     frame.size.height = max(NoteLayout.minimumCollapsedHeight, initial.height + dy)
                 }
                 panel.setFrame(frame, display: true, animate: false)

@@ -688,7 +688,11 @@ struct MarkdownNoteEditor: NSViewRepresentable {
 
         /// HTML spans keep colour and font choices in the Markdown source across restarts/export.
         private func applySavedTextStyles(to storage: NSTextStorage, source: NSString, bodyFont: NSFont) {
-            guard let regex = try? NSRegularExpression(pattern: #"<span style=\"(color:(?:#[0-9a-fA-F]{6}|inherit)|font-family:[^\"<>;]+(?:;font-size:[0-9]{1,3}px)?(?:;font-weight:(?:bold|normal))?(?:;font-style:(?:italic|normal))?|font-size:[0-9]{1,3}px)\">|</span>"#) else { return }
+            let pattern = #"<span style=\"(color:(?:#[0-9a-fA-F]{6}|inherit)|"#
+                + #"font-family:[^\"<>;]+(?:;font-size:[0-9]{1,3}px)?"#
+                + #"(?:;font-weight:(?:bold|normal))?(?:;font-style:(?:italic|normal))?|"#
+                + #"font-size:[0-9]{1,3}px)\">|</span>"#
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
             let full = NSRange(location: 0, length: source.length)
             var stack: [(NSRange, String)] = []
             var spans: [(NSRange, NSRange, String)] = []
@@ -1414,7 +1418,9 @@ final class MarkdownEditingTextView: NSTextView {
             line.line(to: NSPoint(x: end, y: y))
             line.stroke()
         }
-        for marker in markersForDrawing() where !(hideCompletedTasks && marker.checked && !isTaskAwaitingHide(at: (string as NSString).lineRange(for: NSRange(location: marker.range.location, length: 0)).location)) {
+        for marker in markersForDrawing() where !(hideCompletedTasks && marker.checked && !isTaskAwaitingHide(
+            at: (string as NSString).lineRange(for: NSRange(location: marker.range.location, length: 0)).location
+        )) {
             guard let rect = taskMarkerRect(marker.range), rect.intersects(dirtyRect) else { continue }
             let circle = NSBezierPath(ovalIn: rect)
             circle.lineWidth = 1.3
@@ -2190,7 +2196,9 @@ final class MarkdownEditingTextView: NSTextView {
         let end = NSMaxRange(source.lineRange(for: NSRange(location: last, length: 0)))
         let affected = NSRange(location: start, length: end - start)
         guard affected.length > 0 else { return }
-        let prefix = try! NSRegularExpression(pattern: #"^([ \t]*)(?:(?:[-*+] \[[ xX]\]|[-*+]|[0-9]+[.)]|#{1,6})[ \t]+)?"#)
+        guard let prefix = try? NSRegularExpression(
+            pattern: #"^([ \t]*)(?:(?:[-*+] \[[ xX]\]|[-*+]|[0-9]+[.)]|#{1,6})[ \t]+)?"#
+        ) else { return }
         let task = Self.taskLineRegex
         var replacements: [(NSRange, String)] = []
         var ordinal: [Int: Int] = [:]
@@ -2759,7 +2767,11 @@ final class MarkdownEditingTextView: NSTextView {
             showReminderPicker(replacing: reminder, editing: true)
             return
         }
-        if let marker = taskMarkers.first(where: { !(hideCompletedTasks && $0.checked && !isTaskAwaitingHide(at: (string as NSString).lineRange(for: NSRange(location: $0.range.location, length: 0)).location)) && taskMarkerRect($0.range)?.insetBy(dx: -4, dy: -4).contains(point) == true }) {
+        if let marker = taskMarkers.first(where: { marker in
+            !(hideCompletedTasks && marker.checked && !isTaskAwaitingHide(
+                at: (string as NSString).lineRange(for: NSRange(location: marker.range.location, length: 0)).location
+            )) && taskMarkerRect(marker.range)?.insetBy(dx: -4, dy: -4).contains(point) == true
+        }) {
             window?.makeFirstResponder(self)
             pendingTaskPointer = (marker.range, event.locationInWindow, event.locationInWindow, false)
             return
@@ -2767,7 +2779,9 @@ final class MarkdownEditingTextView: NSTextView {
         // The indentation before a task is a gutter, not editable whitespace. Ignore clicks
         // there rather than briefly placing the caret and correcting it after a selection change.
         if taskMarkers.contains(where: { marker in
-            guard !(hideCompletedTasks && marker.checked && !isTaskAwaitingHide(at: (string as NSString).lineRange(for: NSRange(location: marker.range.location, length: 0)).location)) else { return false }
+            guard !(hideCompletedTasks && marker.checked && !isTaskAwaitingHide(
+                at: (string as NSString).lineRange(for: NSRange(location: marker.range.location, length: 0)).location
+            )) else { return false }
             guard let rect = taskMarkerRect(marker.range) else { return false }
             return point.x < rect.minX - 4 && point.y >= rect.minY - 4 && point.y <= rect.maxY + 4
         }) { return }
@@ -2981,7 +2995,7 @@ final class MarkdownEditingTextView: NSTextView {
             for (range, color) in line.colors where NSMaxRange(range) <= storage.length {
                 storage.addAttribute(.foregroundColor, value: color.withAlphaComponent(color.alphaComponent * opacity), range: range)
             }
-            let paragraph = line.paragraph.mutableCopy() as! NSMutableParagraphStyle
+            guard let paragraph = line.paragraph.mutableCopy() as? NSMutableParagraphStyle else { continue }
             let height = max(0.1, line.lineHeight * opacity)
             paragraph.minimumLineHeight = height
             paragraph.maximumLineHeight = height
