@@ -34,6 +34,12 @@ final class AppModel {
     }()
     private(set) var clipboardNoteID: UUID? = UserDefaults.standard.string(forKey: "clipboardNoteID").flatMap(UUID.init(uuidString:))
     private(set) var clipboardCaptureEnabled = UserDefaults.standard.object(forKey: "clipboardCaptureEnabled") as? Bool ?? true
+    /// Whether AI agents may drive Tico over MCP; off by default.
+    private(set) var mcpEnabled: Bool = UserDefaults.standard.bool(forKey: AppModel.mcpEnabledKey)
+    /// Agents currently connected to MCP.
+    private(set) var mcpConnections = 0
+    /// Saved launch-at-login preference, reflected in the menu.
+    private(set) var launchAtLogin: Bool = UserDefaults.standard.bool(forKey: AppModel.launchAtLoginKey)
 
     /// All saved notes (ascending `sortIndex`, i.e. creation order) — drives the menu bar list.
     /// Stays in sync as notes are created, renamed, or deleted.
@@ -414,13 +420,6 @@ extension AppModel {
 
     private static let mcpEnabledKey = "mcpEnabled"
 
-    /// Whether AI agents may drive Tic over MCP. Off by default and remembered; the socket exists
-    /// only while this is on, so a client spawning `Tic --mcp` meanwhile fails fast with a hint.
-    private(set) var mcpEnabled: Bool = UserDefaults.standard.bool(forKey: AppModel.mcpEnabledKey)
-
-    /// Agents connected right now (the MCP window's status line).
-    private(set) var mcpConnections = 0
-
     var mcpSocketPath: String { mcp.socketPath }
 
     func setMCPEnabled(_ enabled: Bool) {
@@ -443,12 +442,6 @@ extension AppModel {
     // MARK: - Launch at login
 
     private static let launchAtLoginKey = "launchAtLogin"
-
-    /// The user's "open at login" preference (drives the menu checkmark). Stored & @Observable so
-    /// the menu updates the tick live; persisted so it survives relaunch. The actual `SMAppService`
-    /// registration only takes effect for a packaged `.app` (a bare `swift run` executable can't
-    /// be a login item).
-    private(set) var launchAtLogin: Bool = UserDefaults.standard.bool(forKey: AppModel.launchAtLoginKey)
 
     func setLaunchAtLogin(_ enabled: Bool) {
         launchAtLogin = enabled   // @Observable → the menu checkmark updates immediately
