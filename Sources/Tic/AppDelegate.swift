@@ -11,26 +11,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         Task { await AppModel.shared.bootstrap() }
-        installNewNoteShortcut()
+        installShortcutMonitor()
         // Update banners (UpdateChecker). `current()` throws without a bundle id (swift run).
         if Bundle.main.bundleIdentifier != nil {
             UNUserNotificationCenter.current().delegate = self
         }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Task { @MainActor in
+            await AppModel.shared.windows.flushPendingWrites()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     /// ⌘N → New Note while Tic is the active app. A menu-style `MenuBarExtra` button's
     /// `keyboardShortcut` only fires while that menu is open, so we dispatch it ourselves via a
     /// local key monitor (fires whenever any Tic window is key).
-    private func installNewNoteShortcut() {
+    private func installShortcutMonitor() {
         newNoteKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // Membership test (not == .command) so Caps Lock / Fn in the flags don't break it,
-            // and case-insensitive so "N" under Caps Lock still matches.
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard flags.contains(.command),
-                  !flags.contains(.shift), !flags.contains(.option), !flags.contains(.control),
-                  event.charactersIgnoringModifiers?.lowercased() == "n" else { return event }
-            Task { @MainActor in AppModel.shared.newNote() }
-            return nil   // consume
+            if NSApp.keyWindow is NotePanel, AppModel.shared.windows.handleArrangementKey(event) { return nil }
+            if event.keyCode == 53,
+               event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty,
+               let dialog = event.window as? NoteClosePanel, dialog.attachedSheet == nil {
+                dialog.onCancel?()
+                return nil
+            }
+            if let panel = NSApp.keyWindow as? NotePanel,
+               event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+               event.charactersIgnoringModifiers?.lowercased() == "w" {
+                panel.performClose(nil)
+                return nil
+            }
+            // A nonactivating floating panel can have the text focus while another app owns
+            // the menu bar. Route standard editing keys to that text view, not that menu.
+            if NSApp.keyWindow is NotePanel, let editor = NSApp.keyWindow?.firstResponder as? NSTextView,
+               !editor.hasMarkedText() {
+                let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+                let key = event.charactersIgnoringModifiers?.lowercased()
+                if modifiers == .command {
+                    switch key {
+                    case "c": editor.copy(nil); return nil
+                    case "x": editor.cut(nil); return nil
+                    case "v": editor.paste(nil); return nil
+                    case "a": editor.selectAll(nil); return nil
+                    case "z": editor.undoManager?.undo(); return nil
+                    default: break
+                    }
+                } else if modifiers == [.command, .shift], key == "z" {
+                    editor.undoManager?.redo()
+                    return nil
+                }
+            }
+            guard !(NSApp.keyWindow?.firstResponder is ShortcutCaptureButton),
+                  let action = ShortcutStore.shared.action(for: event) else { return event }
+            switch action {
+            case .newNote: AppModel.shared.newNote()
+            case .search: AppModel.shared.openSearch()
+            case .settings: AppModel.shared.openSettings()
+            case .addTask, .collapse, .heading, .maximize:
+                guard let panel = NSApp.keyWindow as? NotePanel else { return event }
+                panel.onShortcut?(action)
+            }
+            return nil
         }
     }
 
@@ -67,6 +111,13 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse
     ) async {
-        await MainActor.run { AppModel.shared.openUpdate() }
+        let noteID = response.notification.request.content.userInfo["ticNoteID"] as? String
+        await MainActor.run {
+            if let noteID, let id = UUID(uuidString: noteID) {
+                Task { await AppModel.shared.windows.openNoteByID(id) }
+            } else {
+                AppModel.shared.openUpdate()
+            }
+        }
     }
 }

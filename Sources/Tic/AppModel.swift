@@ -1,7 +1,9 @@
 import AppKit
+import CryptoKit
 import Observation
 import ServiceManagement
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// App-wide coordinator. Bridges the SwiftUI menu bar scene and the AppKit window layer (which
 /// otherwise can't reach each other): it owns the shared `AppDatabase` + `NoteWindowManager`,
@@ -10,21 +12,59 @@ import SwiftUI
 @MainActor
 @Observable
 final class AppModel {
+    private struct ClipboardCapture: Codable {
+        let noteID: UUID
+        let contentHash: String
+        let entryHash: String
+        let entryByteCount: Int
+    }
+    private static let lastClipboardCaptureKey = "lastClipboardCapture"
     static let shared = AppModel()
 
     let database: AppDatabase
     let windows: NoteWindowManager
     let updates = UpdateChecker()
-    let sync: FolderSync
     @ObservationIgnored private let mcp: MCPService
+    @ObservationIgnored private var clipboardTimer: Timer?
+    @ObservationIgnored private var clipboardWrite: Task<Void, Never>?
+    @ObservationIgnored private var clipboardChangeCount = NSPasteboard.general.changeCount
+    @ObservationIgnored private var lastClipboardCapture: ClipboardCapture? = {
+        guard let data = UserDefaults.standard.data(forKey: AppModel.lastClipboardCaptureKey) else { return nil }
+        return try? JSONDecoder().decode(ClipboardCapture.self, from: data)
+    }()
+    private(set) var clipboardNoteID: UUID? = UserDefaults.standard.string(forKey: "clipboardNoteID").flatMap(UUID.init(uuidString:))
+    private(set) var clipboardCaptureEnabled = UserDefaults.standard.object(forKey: "clipboardCaptureEnabled") as? Bool ?? true
 
     /// All saved notes (ascending `sortIndex`, i.e. creation order) — drives the menu bar list.
     /// Stays in sync as notes are created, renamed, or deleted.
     private(set) var notes: [Note] = []
+    private(set) var noteIDsWithTasks: Set<UUID> = []
+    var recentNotes: [Note] {
+        notes.filter { note in
+            if noteIDsWithTasks.contains(note.id) { return true }
+            let markdown = note.markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+            if note.id == clipboardNoteID {
+                let lines = markdown.components(separatedBy: .newlines)
+                let heading = (lines.first ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "#* _\t"))
+                let rest = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                if rest.isEmpty && ["", "Untitled Note", "剪贴板便签", "Clipboard Note"].contains(heading) {
+                    return false
+                }
+            }
+            if !markdown.isEmpty && markdown.range(of: #"^#{1,6}\s*$"#, options: .regularExpression) == nil {
+                return true
+            }
+            let title = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !title.isEmpty && title != "Untitled Note" && title != "Untitled List"
+        }
+    }
 
     @ObservationIgnored private var notesObservation: Task<Void, Never>?
+    @ObservationIgnored private var noteTasksObservation: Task<Void, Never>?
     @ObservationIgnored private var searchWindow: NSWindow?
+    @ObservationIgnored private var mcpWindow: NSWindow?
     @ObservationIgnored private var updateWindow: NSWindow?
+    @ObservationIgnored private var shortcutsWindow: NSWindow?
 
     private init() {
         // The DB lives in Application Support; fall back to in-memory so the app still runs if
@@ -35,9 +75,6 @@ final class AppModel {
         self.database = db
         self.windows = NoteWindowManager(appDatabase: db)
         self.mcp = MCPService(database: db)
-        let support = (try? AppDatabase.supportDirectory()) ?? FileManager.default.temporaryDirectory
-        self.sync = FolderSync(database: db, stateURL: support.appendingPathComponent("sync-state.json"))
-        windows.sync = sync
         NSLog("[Tic] Database ready at \(db.path)")
         mcp.onConnectionCountChange = { [weak self] count in
             Task { @MainActor in self?.mcpConnections = count }
@@ -47,30 +84,159 @@ final class AppModel {
             open: { [weak self] id in await self?.windows.openNoteByID(id) },
             close: { [weak self] id in await self?.windows.closeNoteByID(id) },
             setFrame: { [weak self] id, rect in await self?.windows.setFrame(id, to: rect) },
-            focus: { [weak self] id in await self?.windows.focusNoteByID(id) }
+            focus: { [weak self] id in await self?.windows.focusNoteByID(id) },
+            appendMarkdown: { [weak self] id, content in
+                await self?.windows.appendMarkdown(content, to: id) ?? false
+            }
         )
-        // A list deleted on another Mac is already gone from the database; take its panel down.
-        sync.onNotesDeleted = { [weak self] ids in
-            for id in ids { Task { await self?.windows.closeNoteByID(id) } }
-        }
     }
 
     /// Run once after launch: open saved note panels, then start streaming the notes list.
     func bootstrap() async {
         await windows.restoreAll()
         startObservingNotes()
+        await prepareClipboardNote()
+        startClipboardMonitor()
         applyLaunchAtLogin(launchAtLogin)   // honor the saved preference (effective when packaged)
         if mcpEnabled { applyMCPEnabled(true) }
-        updates.start()
-        sync.start()
+        // This customised build must never replace itself with the upstream project's release.
+        if Bundle.main.object(forInfoDictionaryKey: "TicUpstreamUpdatesEnabled") as? Bool != false {
+            updates.start()
+        }
+    }
+
+    private func prepareClipboardNote() async {
+        if let id = clipboardNoteID, (try? await database.note(id: id)) != nil { return }
+        guard !UserDefaults.standard.bool(forKey: "clipboardNoteInitialized") else {
+            clipboardNoteID = nil
+            clipboardCaptureEnabled = false
+            UserDefaults.standard.set(false, forKey: "clipboardCaptureEnabled")
+            return
+        }
+        do {
+            let title = AppLanguage.text("剪贴板便签", "Clipboard Note")
+            let note = try await database.insertNewNote(Note(title: title, markdown: "# \(title)"))
+            clipboardNoteID = note.id
+            UserDefaults.standard.set(note.id.uuidString, forKey: "clipboardNoteID")
+            UserDefaults.standard.set(true, forKey: "clipboardNoteInitialized")
+            windows.openNote(note, makeKey: false)
+        } catch { NSLog("[Tic] clipboard note creation failed: \(error)") }
+    }
+
+    func setClipboardCaptureEnabled(_ enabled: Bool) {
+        clipboardCaptureEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "clipboardCaptureEnabled")
+        clipboardChangeCount = NSPasteboard.general.changeCount
+    }
+
+    func setClipboardNote(_ id: UUID) {
+        clipboardNoteID = id
+        UserDefaults.standard.set(id.uuidString, forKey: "clipboardNoteID")
+        clipboardChangeCount = NSPasteboard.general.changeCount
+    }
+
+    /// A copy originating in the designated note is already present there; consume only this
+    /// pasteboard generation so a later copy from another app is still captured normally.
+    func ignoreClipboardCopy(from window: NSWindow?, previousChangeCount: Int) {
+        guard let panel = window as? NotePanel, panel.noteID == clipboardNoteID else { return }
+        let current = NSPasteboard.general.changeCount
+        if current != previousChangeCount { clipboardChangeCount = current }
+    }
+
+    private func startClipboardMonitor() {
+        clipboardChangeCount = NSPasteboard.general.changeCount
+        clipboardTimer?.invalidate()
+        clipboardTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.captureClipboardChange() }
+        }
+    }
+
+    private func captureClipboardChange() {
+        let pasteboard = NSPasteboard.general
+        guard pasteboard.changeCount != clipboardChangeCount else { return }
+        clipboardChangeCount = pasteboard.changeCount
+        guard clipboardCaptureEnabled, let noteID = clipboardNoteID else { return }
+        let privateTypes = ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType", "com.agilebits.onepassword"]
+        guard !(pasteboard.types ?? []).contains(where: { privateTypes.contains($0.rawValue) }) else { return }
+        let fileOrImage = pasteboard.hasPastableImage ? pasteboard.pastableImageData() : nil
+        let image: Data?
+        if let fileOrImage {
+            image = fileOrImage
+        } else if let type = pasteboard.availableType(from: [.png, .tiff]),
+                  let data = pasteboard.data(forType: type) {
+            image = TaskImage.normalizedData(data)
+        } else {
+            image = nil
+        }
+        let rawText = pasteboard.string(forType: .string) ?? ""
+        let text = image != nil && rawText.hasPrefix("file://") ? "" : rawText
+        guard !text.isEmpty || image != nil else { return }
+        // Persist only hashes, never another copy of clipboard content.
+        var identity = Data(SHA256.hash(data: Data(text.utf8)))
+        identity.append(image == nil ? 0 : 1)
+        if let image { identity.append(contentsOf: SHA256.hash(data: image)) }
+        let contentHash = Data(SHA256.hash(data: identity)).base64EncodedString()
+        let previous = clipboardWrite
+        clipboardWrite = Task { [self, database, windows] in
+            await previous?.value
+            do { try await windows.restoreClipboardTitle(for: noteID) }
+            catch { NSLog("[Tic] clipboard title restore failed: \(error)") }
+            let markdown = try? await windows.clipboardMarkdown(for: noteID)
+            if image == nil, let markdown, let newline = markdown.firstIndex(of: "\n") {
+                let body = markdown[markdown.index(after: newline)...]
+                let entry = ClipboardContent.entry(text)
+                if body == entry || body.hasPrefix(entry + "\n\n") { return }
+            }
+            if let last = lastClipboardCapture, last.noteID == noteID, last.contentHash == contentHash,
+               let markdown,
+               let newline = markdown.firstIndex(of: "\n") {
+                let body = Data(markdown[markdown.index(after: newline)...].utf8)
+                if body.count >= last.entryByteCount {
+                    let entry = body.prefix(last.entryByteCount)
+                    let suffix = body.dropFirst(last.entryByteCount)
+                    if Data(SHA256.hash(data: entry)).base64EncodedString() == last.entryHash,
+                       suffix.isEmpty || suffix.starts(with: [10, 10]) { return }
+                }
+            }
+            let thumbnail = await Task.detached { () -> Data? in
+                guard let image, let thumb = TaskImage.thumbnail(image) else { return nil }
+                return TaskImage.pngData(thumb)
+            }.value
+            do {
+                var pieces: [String] = []
+                if !text.isEmpty { pieces.append(text) }
+                if let image {
+                    let id = UUID().uuidString
+                    try await database.storeInlineImage(noteID: noteID, id: id, data: image, thumbnail: thumbnail)
+                    pieces.append(ClipboardContent.imageReference(id))
+                }
+                let content = pieces.joined(separator: "\n")
+                try await windows.prependClipboardContent(content, to: noteID)
+                let entry = Data(ClipboardContent.entry(content).utf8)
+                let capture = ClipboardCapture(noteID: noteID, contentHash: contentHash,
+                                               entryHash: Data(SHA256.hash(data: entry)).base64EncodedString(),
+                                               entryByteCount: entry.count)
+                lastClipboardCapture = capture
+                if let data = try? JSONEncoder().encode(capture) {
+                    UserDefaults.standard.set(data, forKey: Self.lastClipboardCaptureKey)
+                }
+            } catch { NSLog("[Tic] clipboard capture failed: \(error)") }
+        }
     }
 
     private func startObservingNotes() {
         notesObservation?.cancel()
+        noteTasksObservation?.cancel()
+        noteTasksObservation = Task { [weak self, database] in
+            do {
+                for try await ids in database.observeNoteIDsWithTasks() { self?.noteIDsWithTasks = Set(ids) }
+            } catch { NSLog("[Tic] task note observation ended: \(error)") }
+        }
         notesObservation = Task { [weak self, database] in
             do {
                 for try await list in database.observeNotes() {
                     self?.notes = list
+                    ReminderScheduler.shared.synchronize(list)
                 }
             } catch {
                 NSLog("[Tic] notes observation ended: \(error)")
@@ -98,14 +264,14 @@ final class AppModel {
         NSApp.activate()
     }
 
-    /// Whether a list syncs with the user's other Macs (Settings › Sync's list of lists).
-    func setSynced(_ note: Note, _ on: Bool) {
-        Task { [database] in try? await database.updateNoteSynced(id: note.id, isSynced: on) }
-    }
-
     /// Permanently delete a note (and its tasks, via the FK cascade). Removed from the list
     /// immediately so it can't be reopened during the async delete; the observation confirms.
     func delete(_ note: Note) {
+        if clipboardNoteID == note.id {
+            setClipboardCaptureEnabled(false)
+            clipboardNoteID = nil
+            UserDefaults.standard.removeObject(forKey: "clipboardNoteID")
+        }
         notes.removeAll { $0.id == note.id }
         Task { await windows.deleteNote(note) }
     }
@@ -120,8 +286,41 @@ final class AppModel {
         searchWindow.map(present)
     }
 
-    /// A borderless-looking floating panel hosting `content` — the shared shell of the Lists palette
-    /// and the update window. Created once and reused.
+    /// Import a saved Tic archive (or a UTF-8 Markdown/text document) as a separate note.
+    func importNote() {
+        let panel = NSOpenPanel()
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        panel.allowedContentTypes = [.json, .plainText, .init(filenameExtension: "md") ?? .plainText]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.prompt = AppLanguage.text("导入", "Import")
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            Task { @MainActor in
+                do {
+                    let data = try Data(contentsOf: url)
+                    let note: Note
+                    if url.pathExtension.lowercased() == "json" {
+                        let archive = try JSONDecoder().decode(NoteArchive.self, from: data)
+                        note = try await self.database.importNote(archive)
+                    } else {
+                        guard let markdown = String(data: data, encoding: .utf8) else { throw NoteArchiveError.invalid }
+                        let archive = try NotePortableFormat.archive(markdown: markdown, fallbackTitle: url.deletingPathExtension().lastPathComponent)
+                        note = try await self.database.importNote(archive)
+                    }
+                    self.windows.openNote(note)
+                } catch {
+                    let alert = NSAlert(error: error)
+                    alert.messageText = AppLanguage.text("导入失败", "Could not import the note")
+                    alert.runModal()
+                }
+            }
+        }
+    }
+
+    /// A borderless-looking floating panel hosting `content` — the shared shell of the Lists palette,
+    /// the MCP setup window and the update window. Created once and reused.
     private static func floatingPanel(width: CGFloat, height: CGFloat, content: some View) -> NSPanel {
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
@@ -140,7 +339,7 @@ final class AppModel {
         panel.standardWindowButton(.closeButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
-        panel.contentView = NSHostingView(rootView: content)
+        panel.contentView = NSHostingView(rootView: LocalizedRoot { content })
         return panel
     }
 
@@ -164,6 +363,33 @@ final class AppModel {
     /// Closes the Lists palette (Escape / pick a list / its close button).
     func dismissSearch() {
         searchWindow?.orderOut(nil)
+    }
+
+    /// Opens the "AI Agents (MCP)" setup window (the toggle + per-client install snippets). A single
+    /// reused, centered, floating panel — same treatment as the Lists palette.
+    func openMCPSetup() {
+        if mcpWindow == nil { mcpWindow = Self.floatingPanel(width: 680, height: 460, content: MCPSetupView()) }
+        mcpWindow.map(present)
+    }
+
+    func dismissMCPSetup() {
+        mcpWindow?.orderOut(nil)
+    }
+
+    func openSettings() {
+        if shortcutsWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 540),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                  backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.minSize = NSSize(width: 600, height: 400)
+            window.contentView = NSHostingView(rootView: LocalizedRoot { SettingsView() })
+            shortcutsWindow = window
+            centerOnActiveDisplay(window)
+        }
+        shortcutsWindow?.title = AppLanguage.text("设置", "Settings")
+        shortcutsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate()
     }
 
     /// Opens the update window (what's new since this version, then Update Now / Later) from the

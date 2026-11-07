@@ -22,6 +22,12 @@ extension MCPTools {
                  inputSchema: object(["note_id": prop("string", "The note's id")], required: ["note_id"]),
                  annotations: readOnly),
 
+            Tool(name: "append_markdown",
+                 description: "Append Markdown to a note's editable body while retaining its existing content and tasks.",
+                 inputSchema: object(["note_id": prop("string", "The note's id"),
+                                      "markdown": prop("string", "Markdown content to append")],
+                                     required: ["note_id", "markdown"])),
+
             Tool(name: "create_note",
                  description: "Create a new sticky note and open it on the desktop. Optionally seed it with tasks. Tasks build an outline: give each a level (0 top, 1-2 nested) to make sub-items.",
                  inputSchema: object([

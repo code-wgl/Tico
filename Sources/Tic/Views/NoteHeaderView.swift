@@ -1,161 +1,75 @@
-import AppKit
 import SwiftUI
 
-/// A sticky note's top row — the editable title, with roll-up / pin / close and a ⋯ options popover fading
-/// in on the right while the pointer is on the note (`isRevealed`, driven by `NoteView`'s hover) — over an
-/// accent rule. Rolled up,
-/// the bar *is* this row (minus the rule, plus the open-task count), so rolling is a pure window shade.
+/// The hover-reveal control strip + editable title for a sticky note. Controls fade in/out via
+/// `isRevealed` (driven by `NoteView`'s hover over the whole note), so the affordances stay
+/// hidden until the pointer is on the note — keeping the small note uncluttered.
 struct NoteHeaderView: View {
     @Bindable var controller: NoteController
     let theme: NoteTheme
     let isRevealed: Bool
-    /// Drawn as the rolled-up bar: the title can't be edited (a click drags, a double-click expands), and
-    /// hover shows only expand / pin / close.
-    var isRolledUp = false
+    var toolbarOnly = false
+    var onAddTask: () -> Void = {}
+    var onClose: () -> Void = {}
 
-    @Binding var titleText: String
-    /// The title is being renamed (owned by `NoteView`, which holds back outside title changes meanwhile).
-    @Binding var isRenaming: Bool
-
-    @State private var showOptions = false
+    @State private var showColorPopover = false
+    @State private var showCompletedPopover = false
     @State private var showClearConfirm = false
-    /// Bumped to flash the sync mark (a cycle touched this list, or Sync Now was pressed).
-    @State private var syncPulse = 0
-    @State private var showsSyncMark = false
-    /// Nil outside the app (tests, previews), where notes never show sync.
-    @Environment(FolderSync.self) private var sync: FolderSync?
+    @State private var hoverClose = false
+    @AppStorage("appLanguage") private var language = "system"
 
     private var note: Note { controller.note }
 
-    /// This list syncs (sync is on in Settings and for this list).
-    private var listSyncs: Bool { note.isSynced && sync?.isEnabled == true }
-    /// Why this list can't sync right now, if it can't.
-    private var syncTrouble: String? { listSyncs ? sync?.problem : nil }
-
-    /// Controls stay up while the options popover is open: it's a separate window, so the pointer leaves
-    /// the note to reach it.
-    private var showsControls: Bool { isRevealed || showOptions || showClearConfirm }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                titleField
-                syncMark
-                Spacer(minLength: 0)
-                if isRolledUp { remainingCount }
-                if showsControls { controls.transition(.opacity) }
-            }
-            .frame(height: NoteLayout.collapsedHeight)   // the rolled-up bar is exactly this row
-
-            if !isRolledUp {
-                Rectangle()
-                    .fill(theme.accent.opacity(0.35))
-                    .frame(height: 1)
-                    .padding(.bottom, 8)
-            }
-        }
-        .padding(.horizontal, 16)
-        // The header is the window's drag handle; double-clicking its chrome rolls the note up or down.
-        .background(WindowMoveArea { controller.toggleCollapsed() })
-        .help(isRolledUp ? "Drag to move · double-click to expand" : "")
-        .task(id: controller.renameRequest) {   // also runs on appear, for a list that opens renaming
-            if controller.renameRequest > 0, !isRolledUp { isRenaming = true }
-        }
-        .onChange(of: sync?.activity[note.id]) { _, _ in if listSyncs { syncPulse += 1 } }
-        .task(id: syncPulse) {   // the mark shows while a sync touches the list, then fades
-            guard syncPulse > 0 else { return }
-            withAnimation(.easeOut(duration: 0.2)) { showsSyncMark = true }
-            try? await Task.sleep(for: .seconds(1.6))
-            while sync?.isSyncing == true, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(200)) }
-            if !Task.isCancelled { withAnimation(.easeIn(duration: 0.4)) { showsSyncMark = false } }
-        }
-    }
-
-    /// Hidden at rest. It appears while a sync sends or brings this list's changes, then fades; it stays,
-    /// in orange, only while sync can't reach its folder.
-    @ViewBuilder private var syncMark: some View {
-        let trouble = syncTrouble
-        if listSyncs, trouble != nil || showsSyncMark {
-            Image(systemName: trouble == nil
-                  ? "arrow.triangle.2.circlepath" : "exclamationmark.arrow.triangle.2.circlepath")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(trouble == nil ? theme.secondary : Color.orange)
-                .help(trouble ?? "Syncing with your other Macs")
-                .transition(.opacity)
-        }
-    }
-
-    /// Plain text that's part of the drag handle (a press drags, a double-click rolls up — in the window's
-    /// hidden title-bar strip, a title taking clicks let macOS zoom the window). Renaming — ⋯ › Rename…, or a
-    /// new list — swaps in an outlined `TitleField`: Return or clicking away saves, Esc restores the old name.
-    @ViewBuilder private var titleField: some View {
-        if isRenaming && !isRolledUp {
-            TitleField(
-                text: $titleText,
-                font: .systemFont(ofSize: NSFont.preferredFont(forTextStyle: .headline).pointSize, weight: .semibold),
-                color: NSColor(theme.title),
-                onEnd: { saved in
-                    if !saved { titleText = note.title }
-                    commitTitle()
-                    isRenaming = false
-                }
-            )
-            .overlay(alignment: .leading) {
-                if titleText.isEmpty { titleLabel.allowsHitTesting(false) }
-            }
-            .background(   // drawn outside the field, so its text stays where the label's was
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(Color.white.opacity(0.45))
-                    .strokeBorder(theme.accent.opacity(0.7))
-                    .padding(.horizontal, -5)
-                    .padding(.vertical, -2)
-            )
+        if toolbarOnly {
+            controlStrip
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
         } else {
-            titleLabel.allowsHitTesting(false)
+            WindowMoveArea { controller.toggleCollapsed() }
+                .frame(height: 14)
+                .help("Drag to move · double-click to collapse")
         }
     }
 
-    private var titleLabel: some View {
-        Text(titleText.isEmpty ? "Untitled List" : titleText)
-            .font(.headline.weight(.semibold))
-            .foregroundStyle(titleText.isEmpty ? theme.secondary : theme.title)
-            .lineLimit(1)
-            .padding(.leading, 2)   // where the field draws its text, so starting a rename doesn't shift it
-    }
+    // MARK: - Control strip
 
-    /// The rolled-up bar's count of tasks still to do.
-    @ViewBuilder private var remainingCount: some View {
-        let remaining = controller.tasks.filter { !$0.isDone }.count
-        if remaining > 0 {
-            Text("\(remaining)")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(theme.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 1)
-                .background(Capsule().fill(theme.accent.opacity(0.18)))
-                .allowsHitTesting(false)
+    private enum ToolbarItem: Hashable { case newNote, addTask, color, completed, clear, collapse }
+
+    private var controlStrip: some View {
+        HStack(spacing: 3) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 3) {
+                    newNoteButton
+                    addTaskButton
+                    colorButton
+                    completedButton
+                    if controller.completedCount > 0 { clearButton }
+                    collapseButton
+                }.fixedSize()
+                HStack(spacing: 3) {
+                    newNoteButton
+                    addTaskButton
+                    colorButton
+                    overflowMenu(shown: [.newNote, .addTask, .color])
+                }.fixedSize()
+                HStack(spacing: 3) {
+                    colorButton
+                    overflowMenu(shown: [.color])
+                }.fixedSize()
+                overflowMenu(shown: []).fixedSize()
+            }
+            .layoutPriority(1)
+            Spacer(minLength: 0)
+            HStack(spacing: 3) {
+                Rectangle().fill(theme.secondary.opacity(0.35)).frame(width: 1, height: 14)
+                maximizeButton
+                floatButton
+                closeButton
+            }.fixedSize()
         }
-    }
-
-    /// Commit the title, normalising the field to the trimmed value so a whitespace-only entry
-    /// becomes empty and the "Untitled List" placeholder reappears.
-    private func commitTitle() {
-        let trimmed = titleText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed != titleText { titleText = trimmed }
-        controller.commitTitle(trimmed)
-    }
-
-    // MARK: - Controls
-
-    /// Just the everyday ones in the row — the rest are under ⋯ — so they're easy to hit and the title keeps
-    /// most of the row.
-    private var controls: some View {
-        HStack(spacing: 6) {
-            if !isRolledUp { optionsButton }
-            collapseButton
-            floatButton
-            closeButton
-        }
+        .frame(height: 22)
+        .animation(.easeInOut(duration: 0.15), value: isRevealed)
+        .animation(.easeInOut(duration: 0.15), value: controller.completedCount > 0)
         .confirmationDialog(
             "Delete \(controller.completedCount) completed task\(controller.completedCount == 1 ? "" : "s")? "
                 + "This can't be undone.",
@@ -167,17 +81,173 @@ struct NoteHeaderView: View {
         }
     }
 
-    private var optionsButton: some View {
-        iconButton(systemName: "ellipsis", isActive: showOptions, help: "List options") {
-            showOptions.toggle()
+    private var addTaskButton: some View {
+        iconButton(systemName: "plus.circle", isActive: false, help: shortcutHelp("添加任务", .addTask), action: onAddTask)
+    }
+
+    private func overflowMenu(shown: Set<ToolbarItem>) -> some View {
+        Menu {
+            if !shown.contains(.newNote) { Button("New note") { controller.requestNewNote() } }
+            if !shown.contains(.addTask) { Button("Add task", action: onAddTask) }
+            if !shown.contains(.color) {
+                Menu("Note color") {
+                    ForEach(NoteColor.allCases) { color in
+                        Button(LocalizedStringKey(color.displayName)) { controller.setColor(color) }
+                    }
+                    Divider()
+                    Button(LocalizedStringKey(note.material == .glass ? "Switch to solid" : "Switch to glass")) { controller.toggleMaterial() }
+                    Menu(label("不透明度", "Opacity")) {
+                        ForEach([30, 50, 70, 85, 100], id: \.self) { value in
+                            Button("\(value)%") { controller.setBackgroundOpacity(Double(value) / 100) }
+                        }
+                    }
+                }
+            }
+            if !shown.contains(.completed) {
+                Toggle("Hide completed", isOn: Binding(
+                    get: { note.hideCompleted }, set: { _ in controller.toggleHideCompleted() }
+                ))
+                Toggle("Move completed to bottom", isOn: Binding(
+                    get: { note.moveCompletedToBottom }, set: { _ in controller.toggleMoveCompletedToBottom() }
+                ))
+            }
+            if controller.completedCount > 0 && !shown.contains(.clear) {
+                Button("Clean up completed tasks") { showClearConfirm = true }
+            }
+            if !shown.contains(.collapse) { Button("Collapse") { controller.toggleCollapsed() } }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(theme.secondary)
+                .frame(width: 22, height: 22)
         }
-        .popover(isPresented: $showOptions, arrowEdge: .bottom) { optionsPopover }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .toolbarTooltip(label("更多操作", "More actions"), trailing: true)
+    }
+
+    private var newNoteButton: some View {
+        iconButton(systemName: "plus.square.on.square", isActive: false, help: shortcutHelp("新建便签", .newNote)) {
+            controller.requestNewNote()
+        }
+    }
+
+    private var colorButton: some View {
+        Button {
+            showColorPopover.toggle()
+        } label: {
+            Circle()
+                .fill(theme.accent)
+                .frame(width: 13, height: 13)
+                .overlay(Circle().strokeBorder(theme.secondary.opacity(0.4), lineWidth: 1))
+                .frame(width: 22, height: 22)
+        }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .toolbarTooltip(label("颜色与背景", "Color and background"))
+        .popover(isPresented: $showColorPopover, arrowEdge: .bottom) { colorPicker }
+    }
+
+    private var colorPicker: some View {
+        let columns = Array(repeating: GridItem(.fixed(26), spacing: 8), count: 4)
+        return VStack(alignment: .leading, spacing: 10) {
+            LazyVGrid(columns: columns, spacing: 8) {
+                ForEach(NoteColor.allCases) { swatch in
+                    Button {
+                        controller.setColor(swatch)
+                    } label: {
+                        Circle()
+                            .fill(swatch.fill)
+                            .frame(width: 24, height: 24)
+                            .overlay(
+                                Circle().strokeBorder(
+                                    swatch == note.color ? swatch.accent : Color.black.opacity(0.12),
+                                    lineWidth: swatch == note.color ? 2.5 : 1
+                                )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(LocalizedStringKey(swatch.displayName))
+                }
+            }
+            Divider()
+            Toggle(label("毛玻璃", "Glass"), isOn: Binding(
+                get: { note.material == .glass },
+                set: { enabled in if enabled != (note.material == .glass) { controller.toggleMaterial() } }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .font(.system(size: 11))
+            Divider()
+            HStack {
+                Text(label("不透明度", "Opacity"))
+                Spacer()
+                Text("\(Int((note.backgroundOpacity ?? 1) * 100))%")
+                    .monospacedDigit().foregroundStyle(.secondary)
+            }
+            .font(.system(size: 11))
+            Slider(value: Binding(get: { note.backgroundOpacity ?? 1 }, set: { controller.setBackgroundOpacity($0) }),
+                   in: 0.3...1, step: 0.05)
+                .controlSize(.small)
+                .accessibilityLabel(Text(label("不透明度", "Opacity")))
+        }
+        .padding(12)
+    }
+
+    private var completedButton: some View {
+        let isActive = note.hideCompleted || note.moveCompletedToBottom
+        return Button {
+            showCompletedPopover.toggle()
+        } label: {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isActive ? theme.accent : theme.secondary)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .toolbarTooltip(label("已完成任务选项", "Completed task options"), trailing: true)
+        .popover(isPresented: $showCompletedPopover, arrowEdge: .bottom) { completedOptionsMenu }
+    }
+
+    /// The two per-note display toggles. `note` is `private(set)`, so each `Toggle` writes through the
+    /// controller's toggle method (the binding's incoming value is ignored — the method flips + persists).
+    private var completedOptionsMenu: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle("Hide completed", isOn: Binding(
+                get: { note.hideCompleted },
+                set: { _ in controller.toggleHideCompleted() }
+            ))
+            Toggle("Move completed to bottom", isOn: Binding(
+                get: { note.moveCompletedToBottom },
+                set: { _ in controller.toggleMoveCompletedToBottom() }
+            ))
+        }
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .font(.callout)
+        .tint(theme.accent)
+        .padding(14)
+        .frame(width: 240)
+    }
+
+    private var clearButton: some View {
+        // A "tidy up" wand rather than a trash can — this clears finished items, it isn't a delete.
+        iconButton(systemName: "wand.and.sparkles", isActive: false, help: label("清理已完成任务", "Clean up completed tasks")) {
+            showClearConfirm = true
+        }
     }
 
     private var collapseButton: some View {
-        iconButton(systemName: isRolledUp ? "chevron.down" : "chevron.up", isActive: false,
-                   help: isRolledUp ? "Expand" : "Roll up") {
+        iconButton(systemName: "chevron.down", isActive: false, help: shortcutHelp("收起便签", .collapse)) {
             controller.toggleCollapsed()
+        }
+    }
+
+    private var maximizeButton: some View {
+        iconButton(systemName: controller.isMaximized ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                   isActive: false, help: shortcutHelp(controller.isMaximized ? "恢复大小" : "放大便签", .maximize)) {
+            controller.toggleMaximize()
         }
     }
 
@@ -186,7 +256,7 @@ struct NoteHeaderView: View {
         return iconButton(
             systemName: isFloating ? "pin.fill" : "pin",
             isActive: isFloating,
-            help: isFloating ? "Unpin from top" : "Keep on top"
+            help: isFloating ? label("取消置顶", "Unpin") : label("置顶", "Keep on top")
         ) {
             controller.toggleFloatOnTop()
         }
@@ -194,18 +264,33 @@ struct NoteHeaderView: View {
 
     private var closeButton: some View {
         Button {
-            controller.requestClose()
+            onClose()
         } label: {
-            Hoverable { hovering in
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(hovering ? Color.red : theme.secondary)
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(hoverClose ? Color.red : theme.secondary)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Close list")
+        .onHover { hoverClose = $0 }
+        .toolbarTooltip(label("关闭便签", "Close note"), trailing: true)
+    }
+
+    private func shortcutHelp(_ title: String, _ action: NoteShortcutAction) -> String {
+        let english: String
+        switch action {
+        case .newNote: english = "New note"
+        case .addTask: english = "Add task"
+        case .collapse: english = "Collapse"
+        case .maximize: english = controller.isMaximized ? "Restore size" : "Fill screen"
+        default: english = action.title
+        }
+        return "\(label(title, english))  \(ShortcutStore.shared.binding(for: action).display)"
+    }
+
+    private func label(_ chinese: String, _ english: String) -> String {
+        AppLanguage.locale(for: language).language.languageCode?.identifier == "zh" ? chinese : english
     }
 
     private func iconButton(
@@ -215,213 +300,54 @@ struct NoteHeaderView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            Hoverable { hovering in
-                Image(systemName: systemName)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(hovering ? theme.title : isActive ? theme.accent : theme.secondary)
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
-        }
-        .buttonStyle(.plain)
-        .help(help)
-    }
-}
-
-// MARK: - Options popover
-
-extension NoteHeaderView {
-    /// Everything that isn't an everyday control: colour, material, the completed-task display options, and
-    /// the note-level actions. `note` is `private(set)`, so each `Toggle` writes through the controller's
-    /// toggle method (the binding's incoming value is ignored — the method flips + persists).
-    private var optionsPopover: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            popoverAction("Rename…", systemImage: "pencil") { controller.requestRename() }
-            Divider()
-            colorSwatches
-            VStack(alignment: .leading, spacing: 10) {
-                optionSwitch("Glass", systemImage: "drop", isOn: Binding(
-                    get: { note.material == .glass },
-                    set: { _ in controller.toggleMaterial() }
-                ))
-                optionSwitch("Hide completed", systemImage: "eye.slash", isOn: Binding(
-                    get: { note.hideCompleted },
-                    set: { _ in controller.toggleHideCompleted() }
-                ))
-                optionSwitch("Move completed to bottom", systemImage: "arrow.down.to.line", isOn: Binding(
-                    get: { note.moveCompletedToBottom },
-                    set: { _ in controller.toggleMoveCompletedToBottom() }
-                ))
-                // Only once sync is on in Settings › Sync; until then there's nothing to switch.
-                if sync?.isEnabled == true {
-                    optionSwitch("Sync", systemImage: "arrow.triangle.2.circlepath", experimental: true, isOn: Binding(
-                        get: { note.isSynced },
-                        set: { _ in controller.toggleSynced() }
-                    ))
-                    .help("Keep this list the same on your other Macs")
-                }
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            .tint(theme.accent)
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                popoverAction("New List", systemImage: "plus") { controller.requestNewNote() }
-                // A "tidy up" wand rather than a trash can — this clears finished items, it isn't a delete.
-                let done = controller.completedCount
-                popoverAction(done > 0 ? "Clean Up \(done) Completed…" : "Clean Up Completed…",
-                              systemImage: "wand.and.sparkles") { showClearConfirm = true }
-                    .disabled(done == 0)
-                if listSyncs {
-                    popoverAction("Sync Now", systemImage: "arrow.clockwise") {
-                        syncPulse += 1
-                        sync?.syncNow()
-                    }
-                }
-            }
-        }
-        .font(.callout)
-        .padding(14)
-        .frame(width: 290)
-    }
-
-    private static let optionIconWidth: CGFloat = 16
-    private static let optionIconGap: CGFloat = 8
-
-    /// An option row's icon and title. The icon sits in a fixed-width column, so every title in the
-    /// popover — switches and actions alike — starts at the same edge whatever the symbol's width.
-    private func optionLabel(_ title: String, systemImage: String) -> some View {
-        HStack(spacing: Self.optionIconGap) {
-            Image(systemName: systemImage).frame(width: Self.optionIconWidth)
-            Text(title).lineLimit(1)
-        }
-    }
-
-    /// A switch row: the label on the left, the switch at the right edge, so every switch lines up.
-    private func optionSwitch(
-        _ title: String, systemImage: String, experimental: Bool = false, isOn: Binding<Bool>
-    ) -> some View {
-        HStack(spacing: 12) {
-            optionLabel(title, systemImage: systemImage)
-            if experimental { ExperimentalTag() }
-            Spacer(minLength: 0)
-            Toggle(title, isOn: isOn).labelsHidden()
-        }
-    }
-
-    private var colorSwatches: some View {
-        HStack(spacing: 8) {
-            ForEach(NoteColor.allCases) { swatch in
-                Button {
-                    controller.setColor(swatch)
-                } label: {
-                    Circle()
-                        .fill(swatch.fill)
-                        .frame(width: 24, height: 24)
-                        .overlay(
-                            Circle().strokeBorder(
-                                swatch == note.color ? swatch.accent : Color.black.opacity(0.12),
-                                lineWidth: swatch == note.color ? 2.5 : 1
-                            )
-                        )
-                }
-                .buttonStyle(.plain)
-                .help(swatch.displayName)
-            }
-        }
-    }
-
-    /// A menu-like row in the popover; it closes the popover, then acts.
-    private func popoverAction(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
-        Button {
-            showOptions = false
-            action()
-        } label: {
-            optionLabel(title, systemImage: systemImage)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isActive ? theme.accent : theme.secondary)
+                .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .toolbarTooltip(help, trailing: systemName.contains("arrow.") || systemName.hasPrefix("pin") || systemName == "chevron.down")
     }
 }
 
-/// The title's rename field: an AppKit text field, not a SwiftUI `TextField` focused through `@FocusState`,
-/// whose focus set from a view update behaves differently across macOS versions. This one makes itself first
-/// responder once it's in the window, and ends — once — on Return or clicking away (`saved`) or Esc (not).
-private struct TitleField: NSViewRepresentable {
-    @Binding var text: String
-    let font: NSFont
-    let color: NSColor
-    let onEnd: (_ saved: Bool) -> Void
-
-    func makeNSView(context: Context) -> Field {
-        let field = Field(string: text)
-        field.isBordered = false
-        field.drawsBackground = false
-        field.focusRingType = .none
-        field.usesSingleLineMode = true
-        field.lineBreakMode = .byTruncatingTail
-        field.cell?.isScrollable = true
-        field.delegate = context.coordinator
-        return field
-    }
-
-    func updateNSView(_ field: Field, context: Context) {
-        context.coordinator.parent = self
-        field.font = font
-        field.textColor = color
-        if field.currentEditor() == nil, field.stringValue != text { field.stringValue = text }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    final class Field: NSTextField {
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            // Deferred: taking first responder mid-update would end editing inside a view update.
-            Task { @MainActor [weak self] in self?.window?.makeFirstResponder(self) }
-        }
-    }
-
-    final class Coordinator: NSObject, NSTextFieldDelegate {
-        var parent: TitleField
-        private var ended = false
-
-        init(_ parent: TitleField) { self.parent = parent }
-
-        func controlTextDidChange(_ note: Notification) {
-            if let field = note.object as? NSTextField { parent.text = field.stringValue }
-        }
-
-        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-            switch selector {
-            case #selector(NSResponder.insertNewline(_:)): end(saved: true)
-            case #selector(NSResponder.cancelOperation(_:)): end(saved: false)
-            default: return false
-            }
-            return true
-        }
-
-        func controlTextDidEndEditing(_ note: Notification) { end(saved: true) }   // clicked away
-
-        private func end(saved: Bool) {
-            guard !ended else { return }
-            ended = true
-            parent.onEnd(saved)
-        }
-    }
-}
-
-/// A header control's label, told whether the pointer is on it: its ink eases from the dim secondary to
-/// the title's (× goes red).
-private struct Hoverable<Content: View>: View {
-    @ViewBuilder let content: (Bool) -> Content
+private struct ToolbarTooltip: ViewModifier {
+    let text: String
+    let trailing: Bool
     @State private var hovering = false
+    @State private var visible = false
 
-    var body: some View {
-        content(hovering)
-            .onHover { inside in withAnimation(.easeInOut(duration: 0.1)) { hovering = inside } }
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: trailing ? .topTrailing : .topLeading) {
+                if visible {
+                    Text(text)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: true, vertical: true)
+                        .padding(.horizontal, 8).padding(.vertical, 5)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.primary.opacity(0.12)))
+                        .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
+                        .offset(y: text.contains("\n") ? -52 : -30)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+            .zIndex(visible ? 1 : 0)
+            .onHover { hovering = $0; if !$0 { visible = false } }
+            .task(id: hovering) {
+                guard hovering else { return }
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                visible = true
+            }
+            .accessibilityHint(Text(text))
+    }
+}
+
+private extension View {
+    func toolbarTooltip(_ text: String, trailing: Bool = false) -> some View {
+        modifier(ToolbarTooltip(text: text, trailing: trailing))
     }
 }

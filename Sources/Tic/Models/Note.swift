@@ -12,6 +12,9 @@ struct Note: Identifiable, Equatable, Codable, Sendable {
     var updatedAt: Date
     var color: NoteColor
     var material: NoteMaterial
+    /// Optional for compatibility with JSON backups created before opacity was introduced.
+    var backgroundOpacity: Double?
+    var markdown: String
 
     // Window placement (screen coordinates), persisted so panels restore where you left them.
     var frameX: Double
@@ -31,10 +34,6 @@ struct Note: Identifiable, Equatable, Codable, Sendable {
     // the tasks themselves): hide finished rows, and/or keep finished subtrees sunk to the bottom.
     var hideCompleted: Bool
     var moveCompletedToBottom: Bool
-    /// Whether this list syncs with the user's other Macs (off until they choose it; lists that arrive
-    /// from another Mac are synced). Per list, and itself synced: turning it off anywhere turns it off
-    /// everywhere, and every Mac keeps its own copy.
-    var isSynced: Bool
 
     init(
         id: UUID = UUID(),
@@ -43,6 +42,8 @@ struct Note: Identifiable, Equatable, Codable, Sendable {
         updatedAt: Date = Date(),
         color: NoteColor = .yellow,
         material: NoteMaterial = .solid,
+        backgroundOpacity: Double? = 1,
+        markdown: String = "",
         frameX: Double = 160,
         frameY: Double = 240,
         frameW: Double = 280,
@@ -53,8 +54,7 @@ struct Note: Identifiable, Equatable, Codable, Sendable {
         isOpen: Bool = true,
         sortIndex: Int = 0,
         hideCompleted: Bool = false,
-        moveCompletedToBottom: Bool = false,
-        isSynced: Bool = false
+        moveCompletedToBottom: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -62,6 +62,8 @@ struct Note: Identifiable, Equatable, Codable, Sendable {
         self.updatedAt = updatedAt
         self.color = color
         self.material = material
+        self.backgroundOpacity = backgroundOpacity
+        self.markdown = markdown
         self.frameX = frameX
         self.frameY = frameY
         self.frameW = frameW
@@ -73,7 +75,6 @@ struct Note: Identifiable, Equatable, Codable, Sendable {
         self.sortIndex = sortIndex
         self.hideCompleted = hideCompleted
         self.moveCompletedToBottom = moveCompletedToBottom
-        self.isSynced = isSynced
     }
 }
 

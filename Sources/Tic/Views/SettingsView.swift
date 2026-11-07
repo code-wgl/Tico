@@ -1,305 +1,303 @@
-import AppKit
 import SwiftUI
+import AppKit
 
-/// Tic's Settings window (⌘, · Tic › Settings… · the menu-bar menu): a standard macOS `Settings`
-/// scene with three grouped-form tabs. Everything here is a thin view over `AppModel` — the launch
-/// item, `UpdateChecker`, `FolderSync` and the MCP service own the actual behaviour.
+/// Native macOS sidebar and grouped forms for application preferences.
 struct SettingsView: View {
-    /// Remembered, so Settings reopens on the tab it was left on.
-    @AppStorage(SettingsTab.storageKey) private var tab = SettingsTab.general
-
-    var body: some View {
-        TabView(selection: $tab) {
-            GeneralSettings().tabItem { Label("General", systemImage: "gearshape") }.tag(SettingsTab.general)
-            SyncSettings().tabItem { Label("Sync", systemImage: "arrow.triangle.2.circlepath") }.tag(SettingsTab.sync)
-            AgentsSettings().tabItem { Label("AI Agents", systemImage: "sparkles") }.tag(SettingsTab.agents)
-        }
-        .frame(width: 560)
-    }
-}
-
-/// A small "Experimental" capsule for features still finding their feet (sync, for now).
-struct ExperimentalTag: View {
-    var body: some View {
-        Text("Experimental")
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(.orange)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 1)
-            .background(Capsule().fill(Color.orange.opacity(0.15)))
-            .help("Sync is new and still experimental")
-    }
-}
-
-enum SettingsTab: String {
-    case general, sync, agents
-    static let storageKey = "settingsTab"
-}
-
-/// "today at 17:42", "yesterday at 09:10", "3 Nov at 17:42".
-private func settingsWhen(_ date: Date) -> String {
-    let time = date.formatted(date: .omitted, time: .shortened)
-    let calendar = Calendar.current
-    if calendar.isDateInToday(date) { return "today at \(time)" }
-    if calendar.isDateInYesterday(date) { return "yesterday at \(time)" }
-    return "\(date.formatted(.dateTime.day().month(.abbreviated))) at \(time)"
-}
-
-// MARK: - General
-
-private struct GeneralSettings: View {
-    @State private var model = AppModel.shared
-    private var updates: UpdateChecker { model.updates }
-
-    var body: some View {
-        Form {
-            Section {
-                Toggle(isOn: Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) })) {
-                    Text("Launch at Login")
-                    Text("Open Tic and its notes when you log in.")
-                }
-            }
-            Section("About") {
-                LabeledContent("Version", value: updates.currentVersion ?? "Development build")
-                Picker("Check for updates", selection: Binding(
-                    get: { updates.frequency }, set: { updates.setFrequency($0) }
-                )) {
-                    ForEach(UpdateChecker.Frequency.allCases) { Text($0.title).tag($0) }
-                }
-                .disabled(updates.currentVersion == nil)
-                LabeledContent {
-                    if updates.available != nil {
-                        Button("View Update…") { model.openUpdate() }
-                    } else {
-                        Button("Check Now") { Task { await updates.check() } }
-                            .disabled(updates.currentVersion == nil || updates.isChecking)
-                    }
-                } label: {
-                    Text(updateStatus).foregroundStyle(.secondary)
-                }
+    private enum SettingsSection: String, CaseIterable, Identifiable {
+        case general, notes, clipboard, shortcuts, advanced, about
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .general: AppLanguage.text("通用", "General")
+            case .notes: AppLanguage.text("便签", "Notes")
+            case .clipboard: AppLanguage.text("剪贴板", "Clipboard")
+            case .shortcuts: AppLanguage.text("键盘快捷键", "Keyboard Shortcuts")
+            case .advanced: AppLanguage.text("高级", "Advanced")
+            case .about: AppLanguage.text("关于", "About")
             }
         }
-        .formStyle(.grouped)
-        .frame(height: 270)
+        var icon: String {
+            switch self {
+            case .general: "gearshape.fill"
+            case .notes: "note.text"
+            case .clipboard: "doc.on.clipboard"
+            case .shortcuts: "keyboard"
+            case .advanced: "slider.horizontal.3"
+            case .about: "info.circle.fill"
+            }
+        }
+        var tint: Color {
+            switch self {
+            case .general: .gray
+            case .notes: .orange
+            case .clipboard: .blue
+            case .shortcuts: .indigo
+            case .advanced: .purple
+            case .about: .teal
+            }
+        }
+        var keywords: String {
+            switch self {
+            case .general: "language login 语言 登录 启动"
+            case .notes: "color glass opacity pin default 颜色 毛玻璃 透明度 置顶 默认"
+            case .clipboard: "copy capture note 复制 收集 便签"
+            case .shortcuts: "keyboard shortcut 键盘 快捷键"
+            case .advanced: "mcp agent 智能体 连接"
+            case .about: "version 版本"
+            }
+        }
     }
 
-    private var updateStatus: String {
-        guard updates.currentVersion != nil else { return "Update checks need the packaged app" }
-        if updates.isChecking { return "Checking…" }
-        if let available = updates.available { return "Version \(available.version) is available" }
-        guard let last = updates.lastChecked else { return "Not checked yet" }
-        return "Up to date · last checked \(settingsWhen(last))"
+    @State private var selection: SettingsSection? = .general
+    @State private var search = ""
+    @AppStorage("appLanguage") private var language = "system"
+    @AppStorage("newNoteColor") private var newColor = "random"
+    @AppStorage("newNoteGlass") private var newGlass = false
+    @AppStorage("newNoteOpacity") private var newOpacity = 1.0
+    @AppStorage("newNotePinned") private var newPinned = false
+    @AppStorage("newNoteHideCompleted") private var newHideCompleted = false
+    private var model: AppModel { .shared }
+    private var shortcutStore: ShortcutStore { .shared }
+    private var sections: [SettingsSection] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return SettingsSection.allCases }
+        return SettingsSection.allCases.filter { ($0.title + " " + $0.keywords).localizedCaseInsensitiveContains(query) }
     }
-}
-
-// MARK: - Sync
-
-private struct SyncSettings: View {
-    @State private var model = AppModel.shared
-    private var sync: FolderSync { model.sync }
 
     var body: some View {
-        Form {
-            Section {
-                Toggle(isOn: Binding(get: { sync.isEnabled }, set: { sync.setEnabled($0) })) {
-                    HStack(spacing: 6) {
-                        Text("Sync lists between Macs")
-                        ExperimentalTag()
-                    }
-                    Text("Only the lists you choose. Which lists are open, and where they sit, stay on each Mac.")
-                }
-            } footer: {
-                VStack(alignment: .leading, spacing: 4) {
-                    Label("Sync is new and still experimental. If a list looks wrong, turn sync off for it and "
-                          + "tell us what happened.", systemImage: "flask")
-                    Link("Report a Problem…", destination: URL(string: "https://github.com/kasvith/tic/issues/new")!)
-                }
-                .foregroundStyle(.secondary)
-            }
-            Section {
-                HStack {
+        NavigationSplitView {
+            VStack(spacing: 0) {
+                SettingsSearchField(text: $search, placeholder: AppLanguage.text("搜索设置", "Search settings"))
+                    .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 8)
+                List(sections, selection: $selection) { section in
                     Label {
-                        Text(sync.folderDisplayName ?? "No folder chosen")
+                        Text(section.title)
                     } icon: {
-                        Image(systemName: "folder.fill").foregroundStyle(.tint)
+                        Image(systemName: section.icon).foregroundStyle(section.tint)
                     }
-                    Spacer()
-                    Button("Choose…") { sync.chooseFolder() }
+                    .tag(section)
                 }
-                .disabled(!sync.isEnabled)
-                if sync.isEnabled, let problem = sync.problem {
-                    Label(problem, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
+                .listStyle(.sidebar)
+                .overlay {
+                    if sections.isEmpty {
+                        Text(AppLanguage.text("没有匹配的设置", "No matching settings"))
+                            .foregroundStyle(.secondary).font(.callout)
+                    }
                 }
-            } header: {
-                Text("Sync folder")
-            } footer: {
-                Text("Choose the same folder on each Mac. iCloud Drive, Dropbox, Google Drive, OneDrive "
-                     + "and Syncthing folders all work.")
-                    .foregroundStyle(.secondary)
             }
-            if sync.isEnabled {
-                Section {
-                    LabeledContent {
-                        Text(thisMacStatus)
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(sync.deviceName)
-                            Text("This Mac")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 5)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(.separator))
+            .navigationSplitViewColumnWidth(min: 170, ideal: 205, max: 270)
+        } detail: {
+            if sections.isEmpty {
+                ContentUnavailableView.search(text: search)
+            } else {
+                VStack(alignment: .leading, spacing: 18) {
+                    settingsHeader
+                    Form {
+                        switch selection ?? .general {
+                        case .general: general
+                        case .notes: notes
+                        case .clipboard: clipboard
+                        case .shortcuts: shortcuts
+                        case .advanced: advanced
+                        case .about: about
                         }
                     }
-                    if sync.peers.isEmpty {
-                        Text("No other Macs yet").foregroundStyle(.secondary)
-                    }
-                    ForEach(sync.peers) { peer in
-                        LabeledContent(peer.name, value: peer.latestChange
-                            .map { "Latest changes \(settingsWhen($0))" } ?? "No changes yet")
-                    }
-                } header: {
-                    Text("Macs")
-                } footer: {
-                    Text(sync.peers.isEmpty
-                         ? "Turn on sync on your other Mac and choose this same folder."
-                         : "Lists created on another Mac arrive closed. Open them from Recent Lists or Search Lists.")
-                        .foregroundStyle(.secondary)
+                    .formStyle(.grouped)
+                    .scrollContentBackground(.hidden)
+                    .frame(maxHeight: formHeight)
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.72),
+                                in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    Spacer(minLength: 0)
                 }
+                .frame(maxWidth: 620, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.horizontal, 24).padding(.top, 25).padding(.bottom, 18)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .navigationTitle((selection ?? .general).title)
             }
-            Section {
-                ForEach(model.notes) { note in
-                    Toggle(isOn: Binding(
-                        get: { note.isSynced && sync.isEnabled }, set: { model.setSynced(note, $0) }
-                    )) {
-                        HStack(spacing: 8) {
-                            RoundedRectangle(cornerRadius: 3).fill(note.color.fill).frame(width: 10, height: 10)
-                            Text(note.title.isEmpty ? "Untitled List" : note.title).lineLimit(1)
-                        }
-                    }
-                }
-            } header: {
-                Text("Lists")
-            } footer: {
-                let synced = model.notes.filter(\.isSynced).count
-                Text(sync.isEnabled
-                     ? "\(synced) of \(model.notes.count) lists sync. New lists don't sync until you turn it on, "
-                        + "here or from the list's ⋯ menu."
-                     : "Turn on sync to choose lists.")
-                    .foregroundStyle(.secondary)
-            }
-            .disabled(!sync.isEnabled)
         }
-        .formStyle(.grouped)
-        .frame(height: 540)
+        .onChange(of: search) { _, _ in
+            if let selected = selection, !sections.contains(selected), let first = sections.first { selection = first }
+        }
     }
 
-    private var thisMacStatus: String {
-        if sync.problem != nil { return "Needs attention" }
-        return sync.lastSynced == nil ? "Starting…" : "Up to date"
+    private var settingsHeader: some View {
+        let section = selection ?? .general
+        return HStack(spacing: 13) {
+            Image(systemName: section.icon)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(section.tint)
+                .frame(width: 42, height: 42)
+                .background(section.tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(section.title).font(.title2.weight(.semibold))
+                Text(sectionDescription(section)).font(.callout).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private var formHeight: CGFloat {
+        switch selection ?? .general {
+        case .general, .advanced, .clipboard: 155
+        case .notes: 350
+        case .shortcuts: 460
+        case .about: 120
+        }
+    }
+
+    private func sectionDescription(_ section: SettingsSection) -> String {
+        switch section {
+        case .general: AppLanguage.text("语言与启动设置", "Language and startup")
+        case .notes: AppLanguage.text("新建便签的外观与行为", "Appearance and behavior for new notes")
+        case .clipboard: AppLanguage.text("管理剪贴板内容收集", "Manage clipboard capture")
+        case .shortcuts: AppLanguage.text("自定义常用操作的快捷键", "Customize keyboard shortcuts")
+        case .advanced: AppLanguage.text("连接本机智能体", "Connect local agents")
+        case .about: AppLanguage.text("应用信息", "Application information")
+        }
+    }
+
+    @ViewBuilder private var general: some View {
+        Section {
+            Picker(AppLanguage.text("语言", "Language"), selection: $language) {
+                Text("Follow System").tag("system")
+                Text("简体中文").tag("zh-Hans")
+                Text("English").tag("en")
+            }
+            Toggle(AppLanguage.text("登录时启动", "Launch at login"), isOn: Binding(
+                get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) }))
+                .toggleStyle(.switch)
+        } header: {
+            Text(AppLanguage.text("通用", "General"))
+        }
+    }
+
+    @ViewBuilder private var notes: some View {
+        Section {
+            Picker(AppLanguage.text("默认颜色", "Default color"), selection: $newColor) {
+                Text(AppLanguage.text("随机", "Random")).tag("random")
+                ForEach(NoteColor.allCases) { color in Text(LocalizedStringKey(color.displayName)).tag(color.rawValue) }
+            }
+            Toggle(AppLanguage.text("毛玻璃背景", "Glass background"), isOn: $newGlass).toggleStyle(.switch)
+            LabeledContent(AppLanguage.text("背景不透明度", "Background opacity")) {
+                HStack {
+                    Slider(value: $newOpacity, in: 0.3...1, step: 0.05)
+                        .accessibilityLabel(Text(AppLanguage.text("背景不透明度", "Background opacity")))
+                    Text("\(Int((newOpacity * 100).rounded()))%")
+                        .monospacedDigit().foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+                }.frame(maxWidth: 220)
+            }
+        } header: {
+            Text(AppLanguage.text("外观", "Appearance"))
+        }
+        Section {
+            Toggle(AppLanguage.text("新便签置顶", "Pin new notes"), isOn: $newPinned).toggleStyle(.switch)
+            Toggle(AppLanguage.text("隐藏已完成任务", "Hide completed tasks"), isOn: $newHideCompleted).toggleStyle(.switch)
+        } header: {
+            Text(AppLanguage.text("行为", "Behavior"))
+        } footer: {
+            Text(AppLanguage.text("这些设置仅应用于新建便签。", "These settings apply to newly created notes."))
+        }
+    }
+
+    @ViewBuilder private var clipboard: some View {
+        Section {
+            Picker(AppLanguage.text("剪贴板便签", "Clipboard note"), selection: Binding(
+                get: { model.clipboardNoteID?.uuidString ?? "" },
+                set: { if let id = UUID(uuidString: $0) { model.setClipboardNote(id) } })) {
+                Text("Select a note").tag("")
+                ForEach(model.notes) { note in
+                    Text(verbatim: note.title.isEmpty ? "Untitled Note" : note.title).tag(note.id.uuidString)
+                }
+            }
+            Toggle(AppLanguage.text("自动收集剪贴板", "Capture clipboard"), isOn: Binding(
+                get: { model.clipboardCaptureEnabled }, set: { model.setClipboardCaptureEnabled($0) }))
+                .toggleStyle(.switch).disabled(model.clipboardNoteID == nil)
+        } header: {
+            Text(AppLanguage.text("剪贴板", "Clipboard"))
+        } footer: {
+            Text(AppLanguage.text("复制的文字和图片会添加到所选便签中。", "Copied text and images are added to the selected note."))
+        }
+    }
+
+    @ViewBuilder private var shortcuts: some View {
+        Section {
+            ForEach(NoteShortcutAction.allCases) { action in
+                LabeledContent(AppLanguage.text(translation(for: action), action.title)) {
+                    ShortcutRecorder(label: shortcutStore.binding(for: action).display) { shortcutStore.record($0, for: action) }
+                        .frame(width: 120, height: 26)
+                }
+            }
+        } header: {
+            Text(AppLanguage.text("键盘快捷键", "Keyboard Shortcuts"))
+        } footer: {
+            HStack {
+                Text(LocalizedStringKey(shortcutStore.message))
+                Spacer()
+                Button("Restore Defaults") { shortcutStore.reset() }
+            }
+        }
+    }
+    private func translation(for action: NoteShortcutAction) -> String {
+        switch action {
+        case .newNote: "新建便签"
+        case .search: "搜索便签"
+        case .settings: "设置"
+        case .addTask: "添加任务"
+        case .collapse: "收起或展开便签"
+        case .heading: "切换标题"
+        case .maximize: "放大或恢复"
+        }
+    }
+
+    @ViewBuilder private var advanced: some View {
+        Section {
+            Toggle(AppLanguage.text("允许 MCP 连接", "Allow MCP connections"), isOn: Binding(
+                get: { model.mcpEnabled }, set: { model.setMCPEnabled($0) })).toggleStyle(.switch)
+            LabeledContent(AppLanguage.text("连接配置", "Connection setup")) {
+                Button(AppLanguage.text("打开…", "Open…")) { model.openMCPSetup() }
+            }
+        } header: {
+            Text("MCP")
+        } footer: {
+            Text(AppLanguage.text("开启后，可通过 MCP 连接本机智能体。", "Enable MCP to connect local agents."))
+        }
+    }
+
+    @ViewBuilder private var about: some View {
+        Section {
+            LabeledContent(AppLanguage.text("版本", "Version")) {
+                Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Tico")
+        }
     }
 }
 
-// MARK: - AI Agents (MCP)
-
-/// The MCP switch with live status, then one client's copy-paste (or one-click) setup. Every
-/// snippet spawns the same `Tic --mcp`, so this is one command presented per client.
-private struct AgentsSettings: View {
-    @State private var model = AppModel.shared
-    @State private var selection: String
-    @State private var copied = false
-
-    private let clients: [MCPClient]
-    private let inApplications: Bool
-
-    init() {
-        let exe = Bundle.main.executableURL?.path ?? "Tic"
-        clients = MCPClients.all(executablePath: exe)
-        inApplications = Bundle.main.bundleURL.path.hasPrefix("/Applications")
-        _selection = State(initialValue: "Claude Code")
+/// AppKit search field keeps the system search icon, clear button and keyboard behavior.
+private struct SettingsSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.delegate = context.coordinator
+        field.placeholderString = placeholder
+        return field
     }
-
-    private var client: MCPClient { clients.first { $0.id == selection } ?? clients[0] }
-
-    var body: some View {
-        Form {
-            Section {
-                Toggle(isOn: Binding(get: { model.mcpEnabled }, set: { model.setMCPEnabled($0) })) {
-                    Text("Allow AI agents to use Tic")
-                    Text("Lets Claude, Cursor and other MCP clients draft and tick your lists.")
-                }
-                LabeledContent("Status") {
-                    HStack(spacing: 6) {
-                        Circle().fill(model.mcpEnabled ? Color.green : Color.secondary).frame(width: 8, height: 8)
-                        Text(statusText)
-                    }
-                }
-            }
-            Section {
-                Picker("Client", selection: $selection) {
-                    ForEach(clients, id: \.id) { Text($0.name).tag($0.id) }
-                }
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(client.detail).foregroundStyle(.secondary)
-                    ScrollView {
-                        Text(client.snippet)
-                            .font(.system(size: 12, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(10)
-                    }
-                    .frame(height: 130)
-                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
-                    HStack(spacing: 8) {
-                        if let link = client.deeplink {
-                            Button("Add to \(client.name)") { open(link) }.buttonStyle(.borderedProminent)
-                        }
-                        Button(copied ? "Copied" : "Copy") { copy() }
-                        if let path = client.configPath {
-                            Button("Open Config File") { openConfig(path) }
-                        }
-                    }
-                }
-                .padding(.vertical, 4)
-            } header: {
-                Text("Connect a client")
-            } footer: {
-                if !inApplications {
-                    Text("Tic isn't in /Applications. The path in this command changes if you move the app.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .frame(height: 520)
-        .onChange(of: selection) { copied = false }
+    func updateNSView(_ field: NSSearchField, context: Context) {
+        context.coordinator.parent = self
+        field.placeholderString = placeholder
+        if field.stringValue != text { field.stringValue = text }
     }
-
-    private var statusText: String {
-        guard model.mcpEnabled else { return "Off" }
-        let n = model.mcpConnections
-        return n == 0 ? "Running · no agents connected" : "Running · \(n) connected"
-    }
-
-    private func copy() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(client.snippet, forType: .string)
-        copied = true
-    }
-
-    /// Opens a client install deeplink (Cursor / VS Code).
-    private func open(_ link: String) {
-        if let url = URL(string: link) { NSWorkspace.shared.open(url) }
-    }
-
-    /// Opens the client's config file, or reveals its folder in Finder if the file doesn't exist yet.
-    private func openConfig(_ path: String) {
-        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-        if FileManager.default.fileExists(atPath: url.path) {
-            NSWorkspace.shared.open(url)
-        } else {
-            NSWorkspace.shared.activateFileViewerSelecting([url.deletingLastPathComponent()])
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var parent: SettingsSearchField
+        init(_ parent: SettingsSearchField) { self.parent = parent }
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSSearchField else { return }
+            parent.text = field.stringValue
         }
     }
 }

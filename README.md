@@ -1,123 +1,71 @@
 <div align="center">
-  <img src="Assets/AppIcon/Tic-256.png" width="128" alt="Tic icon">
-  <h1>Tic</h1>
-  <p><strong>Floating, Stickies-style task lists for macOS.</strong></p>
+  <img src="Assets/AppIcon/Tic-256.png" width="120" alt="Tico app icon">
+  <h1>Tico</h1>
+  <p><strong>把想法和待办留在桌面上。</strong></p>
+  <p>Native floating notes and task lists for macOS.</p>
 
-[![CI](https://github.com/kasvith/tic/actions/workflows/ci.yml/badge.svg)](https://github.com/kasvith/tic/actions/workflows/ci.yml)
-[![GitHub Release](https://img.shields.io/github/v/release/kasvith/tic)](https://github.com/kasvith/tic/releases)
-[![GitHub Downloads](https://img.shields.io/github/downloads/kasvith/tic/total)](https://github.com/kasvith/tic/releases)
-
-<a href="https://www.producthunt.com/products/tic?utm_source=badge-follow&utm_medium=badge&utm_source=badge-tic" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/follow.svg?product_id=1317575&theme=light" alt="Tic - To&#0045;do&#0032;lists&#0032;that&#0032;live&#0032;on&#0032;your&#0032;desktop&#0044;&#0032;not&#0032;in&#0032;a&#0032;menu&#0032;bar | Product Hunt" style="width: 250px; height: 54px;" width="250" height="54" /></a>
-
-<a href="https://tic.kasvith.me"><img src="site/public/og.png" alt="Tic sticky-note to-do lists floating on a Mac desktop"></a>
-
+  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 </div>
 
-Tic keeps your lists **on the desktop** as floating sticky notes instead of buried behind a menu
-bar click — glance at them, check things off, drag them around. Each note is its own checklist.
+Tico 是一款 macOS 桌面便签应用。每张便签都是独立的窗口，适合随手记录、整理任务，并在工作时保持内容可见。它基于开源项目 [Tic](https://github.com/kasvith/tic) 构建，并在此基础上持续改进。
 
-## Features
+Tico is a native macOS sticky-note app for keeping notes and tasks close at hand. It builds on the open-source [Tic](https://github.com/kasvith/tic) project.
 
-- **Floating sticky notes** — borderless, draggable, resizable panels; optional float-on-top and
-  show-on-all-Spaces per note. Positions and state are remembered across launches.
-- **Multiple lists** — create from the menu bar, **⌘N**, the in-note **+**, or the Dock menu.
-  New lists are auto-named *List 1, List 2, …*
-- **Rich tasks** — **subtasks** up to 3 levels (completing a parent completes its children),
-  **multiline** notes (Shift-Return), and inline Markdown (`**bold**`, `*italic*`, `` `code` ``,
-  `~~strike~~`, links). Tap to edit; drag to reorder, or drag right to nest.
-- **Solid or Liquid-Glass** notes — per-note color themes, or a translucent material that shows
-  the desktop through it.
-- **Roll-up** — double-click a note's title bar to collapse it to just the header.
-- **Raycast-style search palette** — a floating, centered command palette to search/open/delete
-  any list, with keyboard navigation.
-- **Launch at Login**, a custom menu-bar icon, and a native Dock identity.
+## 功能 Features
 
-## Requirements
+- **桌面便签**：创建、移动、缩放和收起便签；可按需置顶或显示在所有空间。
+- **任务与 Markdown**：使用清单、子任务和 Markdown 组织内容，支持拖动调整任务顺序。
+- **外观与管理**：为便签选择颜色和背景，搜索便签，并在下次启动时恢复窗口状态。
+- **本地存储**：通过 SQLite 保存便签和任务；正式版与开发版使用各自的数据目录。
+- **更多工具**：提供图片、提醒、导入导出，以及可在设置中开启的 MCP 集成。
 
-macOS **14 (Sonoma)** or later, on Apple silicon.
+## 系统要求 Requirements
 
-## Install
+- macOS 14 或更高版本。
+- 从源码构建需要 Swift 6.0 或更高版本，以及与项目依赖兼容的 Xcode 和 macOS SDK。项目开发规范使用 Swift 6.2 / Xcode 26。
 
-Paste this in Terminal:
+## 安装 Installation
+
+如果仓库已有可下载的构建，请在 [GitHub Releases](https://github.com/code-wgl/Tico/releases) 查看对应版本及安装说明。也可以按下方步骤从源码构建。
+
+本项目的本地打包脚本使用 ad-hoc 签名；这种签名不等同于 Apple Developer ID 签名或公证，其他 Mac 的首次打开体验可能受到 macOS 安全设置影响。
+
+## 从源码构建 Build from source
 
 ```sh
-curl -fsSL https://tic.kasvith.me/install.sh | sh
+git clone git@github.com:code-wgl/Tico.git
+cd Tico
+swift build
+swift test
+./scripts/package.sh           # 开发版，使用独立数据目录
+./scripts/package.sh --stable  # 正式版
 ```
 
-It installs Tic to `/Applications` (or `~/Applications` on a non-admin account) and opens it. Run it
-again any time to update. Tic isn't notarized, and macOS adds a quarantine flag to apps downloaded in
-a browser, which makes Gatekeeper block the first launch; `curl` doesn't add that flag, so this
-just works. The script is short and readable: [`site/public/install.sh`](site/public/install.sh).
+项目使用 Swift Package Manager 管理依赖，首次构建需要联网下载依赖。打包产物位于 `dist/development/` 或 `dist/stable/`；使用 `--open` 可在打包后打开应用。也可使用 `open Package.swift` 在 Xcode 中打开项目。
 
-**Or download it by hand:** get the `.dmg` from the
-[latest release](https://github.com/kasvith/tic/releases/latest), move **`Tic.app`** to
-`/Applications`, then clear the quarantine flag once:
+> 兼容已有用户数据：正式版保留原 Tic 的应用标识和 `~/Library/Application Support/Tic/` 数据目录；开发版使用独立目录。备份和迁移时请注意保护自己的便签数据。
 
-```sh
-xattr -c /Applications/Tic.app
-```
+## 使用 Usage
 
-(Alternatively: right-click `Tic.app` → **Open** → **Open**.) To have Tic open automatically, enable
-**Launch at Login** from its menu-bar menu.
+1. 从菜单栏创建或查找便签，或使用 **⌘N** 新建。
+2. 在便签内输入内容、管理任务，拖动调整位置和尺寸。
+3. 双击标题栏可收起或展开便签；在设置中调整快捷键和其他偏好。
+4. 需要 AI 客户端访问时，在应用的 MCP 设置中开启并按界面说明配置。
 
-## Build from source
+## 项目结构 Project structure
 
-Tic is a Swift Package — no `.xcodeproj` needed.
-
-```sh
-swift run                 # build + launch (dev)
-swift build -c release    # release build
-swift test                # run the test suite (Swift Testing)
-./scripts/package.sh      # assemble dist/Tic.app (add --open to launch it)
-open Package.swift        # edit in Xcode
-```
-
-## Usage
-
-- The menu-bar icon lists your **recent lists** (with a **More Lists** submenu for the rest) and
-  opens **Search Lists…**, **New List** (⌘N), and **Launch at Login**.
-- Hover a note to reveal its controls: color, solid/glass, float-on-top, roll-up, **+** new list,
-  and close. Click the title to rename; the bottom field adds tasks (Return keeps focus).
-- Hover a task to reveal a **✕** (delete) and, below it, a **＋** line — click it to add a subtask
-  nested under that row. An empty task you don't fill in disappears when you click away.
-
-## Keyboard shortcuts
-
-| Shortcut | Action |
+| 路径 | 用途 |
 | --- | --- |
-| **Return** | Finish editing a task / add the typed task |
-| **Shift-Return** (or **⌥ Return**) | New line within the same task |
-| **Shift-Tab** | Make the task a subtask (nest one level deeper) |
-| **⌃ Shift-Tab** | Un-nest a subtask (move it back out) |
-| **⌘N** | New list |
-| **Double-click** the title bar | Roll the note up / down |
+| `Sources/Tic/` | SwiftUI / AppKit 应用、窗口管理、数据库和 MCP 实现 |
+| `Tests/TicTests/` | Swift 测试 |
+| `Assets/`、`Packaging/` | 图标和应用打包资源 |
+| `scripts/package.sh` | 本地开发版和正式版打包脚本 |
+| `site/` | 项目网站 |
 
-You can also **drag a task** to reorder it, or **drag it right** to nest it — the drop indicator
-shows where (and at what level) it will land. The relevant chord (`⇧⏎ line`, `⇧⇥ nest`) shows as a
-tiny keycap hint right in the field while you're editing, so you don't have to memorise this table.
+## 参与贡献 Contributing
 
-## Architecture
+欢迎提交 issue 和 pull request。提交前请描述问题或使用场景，保持修改范围清晰，并在本地运行 `swift build` 和 `swift test`。涉及界面、窗口、数据或打包的修改，也请说明实际验证方式和已知限制。
 
-SwiftUI views hosted inside AppKit `NSPanel`s (the only way to get true desktop-sticky behavior),
-backed by **SQLite via GRDB**. An `AppModel` coordinator bridges the menu bar to the window layer.
-See [`CLAUDE.md`](CLAUDE.md) for the full breakdown.
+## 致谢与许可 Credits and license
 
-**Stack:** Swift 6 · SwiftUI + AppKit · GRDB (SQLite) · `SMAppService` (login item).
-
-## Development & releases
-
-- **CI** (`.github/workflows/ci.yml`) builds, tests, and lints on every push/PR.
-- **Changelog** is generated from [Conventional Commits](https://www.conventionalcommits.org)
-  with [git-cliff](https://git-cliff.org) (`cliff.toml`) and kept in `CHANGELOG.md`.
-- **Releases are tag-based:** push a `v*` tag and the release workflow builds `Tic.app`, generates
-  release notes, and publishes a GitHub Release with the zipped app.
-
-  ```sh
-  git tag v0.1.0 && git push origin v0.1.0
-  ```
-
-Icon source art lives in [`Assets/`](Assets) (AppIcon / Flat / MenuBar).
-
-## License
-
-Released under the [MIT License](LICENSE). © 2026 Kasun Vithanage.
+Tico 基于 [Kasun Vithanage 的 Tic](https://github.com/kasvith/tic)。感谢原作者和所有贡献者。本项目按 [MIT License](LICENSE) 发布；原项目版权声明保留在许可证文件中。

@@ -17,6 +17,7 @@ struct MCPTools: Sendable {
         var close: @Sendable (UUID) async -> Void = { _ in }
         var setFrame: @Sendable (UUID, CGRect) async -> Void = { _, _ in }
         var focus: @Sendable (UUID) async -> Void = { _ in }
+        var appendMarkdown: @Sendable (UUID, String) async -> Bool = { _, _ in false }
     }
 
     private struct ToolError: Error { let message: String; init(_ m: String) { message = m } }
@@ -34,6 +35,7 @@ struct MCPTools: Sendable {
             switch name {
             case "list_notes":      value = try await listNotes()
             case "get_note":        value = try await getNote(args)
+            case "append_markdown": value = try await appendMarkdown(args)
             case "create_note":     value = try await createNote(args)
             case "update_note":     value = try await updateNote(args)
             case "move_note":       value = try await moveNote(args)
@@ -77,6 +79,16 @@ struct MCPTools: Sendable {
         let tasks = try await database.tasks(noteId: id)
         let imageIds = try await database.taskImageIds(noteId: id)
         return noteValue(note, tasks: tasks, imageIds: imageIds)
+    }
+
+    private func appendMarkdown(_ args: Args) async throws -> Value {
+        let id = try args.uuid("note_id")
+        _ = try await note(id)
+        guard let markdown = args.string("markdown"), !markdown.isEmpty, markdown.count <= Self.maxTextLength else {
+            throw ToolError("'markdown' must contain 1–20000 characters")
+        }
+        guard await window.appendMarkdown(id, markdown) else { throw ToolError("Could not append Markdown") }
+        return .object(["note_id": .string(id.uuidString), "appended": .bool(true)])
     }
 
     private func createNote(_ args: Args) async throws -> Value {
@@ -353,6 +365,7 @@ struct MCPTools: Sendable {
         var o: [String: Value] = [
             "id": .string(n.id.uuidString),
             "title": .string(n.title),
+            "markdown": .string(n.markdown),
             "color": .string(n.color.rawValue),
             "material": .string(n.material.rawValue),
             "is_open": .bool(n.isOpen),

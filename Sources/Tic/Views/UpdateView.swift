@@ -30,7 +30,7 @@ struct UpdateView: View {
                 .resizable()
                 .frame(width: 44, height: 44)
             VStack(alignment: .leading, spacing: 3) {
-                Text("Tic v\(release.version) is available").font(.system(size: 17, weight: .semibold))
+                Text("Tico v\(release.version) is available").font(.system(size: 17, weight: .semibold))
                 Text("You have v\(current)").font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
@@ -86,7 +86,7 @@ struct UpdateView: View {
         HStack(spacing: 10) {
             switch updates.installState {
             case .idle:
-                Text("Tic restarts to finish; your lists are kept.").font(.callout).foregroundStyle(.secondary)
+                Text("Tico restarts to finish; your lists are kept.").font(.callout).foregroundStyle(.secondary)
                 Spacer()
                 Button("Update Later") { model.dismissUpdate() }.keyboardShortcut(.cancelAction)
                 Button("Update Now") { updates.install() }.keyboardShortcut(.defaultAction)

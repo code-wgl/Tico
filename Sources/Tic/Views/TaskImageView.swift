@@ -83,7 +83,7 @@ struct TaskImageView: View {
                 .background(.ultraThinMaterial, in: Circle())
         }
         .buttonStyle(.plain)
-        .help(help)
+        .help(LocalizedStringKey(help))
     }
 
     // MARK: - Crop mode

@@ -8,13 +8,9 @@ struct TicApp: App {
         // Native .menu style (default): its content is rebuilt each time the menu opens, so it
         // reliably reflects the current lists — unlike .window, which didn't re-render here.
         MenuBarExtra {
-            MenuBarContent()
+            LocalizedRoot { MenuBarContent() }
         } label: {
             MenuBarLabel()
-        }
-
-        Settings {
-            SettingsView()
         }
     }
 }
@@ -84,7 +80,7 @@ private struct MenuBarLabel: View {
 }
 
 /// The Tic menu bar menu: New List, recent lists (with a "More Lists" submenu for up to 100),
-/// a Search window, Settings, and Quit.
+/// a Search window, and Quit.
 private struct MenuBarContent: View {
     private var model: AppModel { AppModel.shared }
     private static let recentCount = 5
@@ -92,11 +88,12 @@ private struct MenuBarContent: View {
 
     var body: some View {
         Button("New List") { model.newNote() }
-            .keyboardShortcut("n")   // hint + works while the menu is open; AppDelegate covers the rest
+        Button(AppLanguage.text("导入便签…", "Import Note…")) { model.importNote() }
+        Button(AppLanguage.text("框选便签…", "Select Notes…")) { model.windows.selectNotesInArea() }
 
         Divider()
 
-        let recent = model.notes.sorted { $0.updatedAt > $1.updatedAt }
+        let recent = model.recentNotes.sorted { $0.updatedAt > $1.updatedAt }
         if recent.isEmpty {
             Text("No lists yet")
         } else {
@@ -119,7 +116,14 @@ private struct MenuBarContent: View {
 
         Button("Search Lists…") { model.openSearch() }
 
-        SettingsMenuItem()
+        Button("AI Agents (MCP)…") { model.openMCPSetup() }
+
+        Button("Settings…") { model.openSettings() }
+
+        Toggle("Launch at Login", isOn: Binding(
+            get: { model.launchAtLogin },
+            set: { model.setLaunchAtLogin($0) }
+        ))
 
         if let title = model.updates.menuTitle {
             Divider()
@@ -129,25 +133,11 @@ private struct MenuBarContent: View {
 
         Divider()
 
-        Button("Quit Tic") { NSApplication.shared.terminate(nil) }
+        Button("Quit Tico") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
     }
 
     private func label(_ note: Note) -> String {
         note.title.isEmpty ? "Untitled List" : note.title
-    }
-}
-
-/// Opens Settings and brings it forward: opening a window from a menu-bar menu doesn't make the app
-/// active, so without `activate` it would appear behind whatever app was in front.
-private struct SettingsMenuItem: View {
-    @Environment(\.openSettings) private var openSettings
-
-    var body: some View {
-        Button("Settings…") {
-            NSApp.activate()
-            openSettings()
-        }
-        .keyboardShortcut(",")
     }
 }

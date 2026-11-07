@@ -203,6 +203,18 @@ final class EditorTextView: NSTextView {
         }
     }
 
+    override func copy(_ sender: Any?) {
+        let before = NSPasteboard.general.changeCount
+        super.copy(sender)
+        AppModel.shared.ignoreClipboardCopy(from: window, previousChangeCount: before)
+    }
+
+    override func cut(_ sender: Any?) {
+        let before = NSPasteboard.general.changeCount
+        super.cut(sender)
+        AppModel.shared.ignoreClipboardCopy(from: window, previousChangeCount: before)
+    }
+
     /// A plain-text view disables Paste when the clipboard holds only an image; re-enable it for one.
     override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(paste(_:)), onPasteImage != nil, NSPasteboard.general.hasPastableImage {

@@ -10,11 +10,12 @@ struct ListsSearchView: View {
     @State private var selectedID: Note.ID?
     @State private var scrollRequest: Note.ID?
     @State private var pointerAtKeyMove: NSPoint?
+    @State private var noteToDelete: Note?
     @FocusState private var searchFocused: Bool
 
     private var results: [Note] {
         let query = search.trimmingCharacters(in: .whitespaces)
-        let byRecency = model.notes.sorted { $0.updatedAt > $1.updatedAt }
+        let byRecency = model.recentNotes.sorted { $0.updatedAt > $1.updatedAt }
         guard !query.isEmpty else { return byRecency }
         return byRecency.filter { $0.title.localizedCaseInsensitiveContains(query) }
     }
@@ -38,6 +39,14 @@ struct ListsSearchView: View {
         .onKeyPress(.downArrow) { move(1); return .handled }
         .onKeyPress(.upArrow) { move(-1); return .handled }
         .onExitCommand { model.dismissSearch() }
+        .alert("Delete this note?", isPresented: Binding(
+            get: { noteToDelete != nil }, set: { if !$0 { noteToDelete = nil } }
+        ), presenting: noteToDelete) { note in
+            Button("Delete Note", role: .destructive) { model.delete(note); noteToDelete = nil }
+            Button("Cancel", role: .cancel) { noteToDelete = nil }
+        } message: { note in
+            Text("“\(note.title.isEmpty ? "Untitled Note" : note.title)” and all its tasks will be permanently deleted. This cannot be undone.")
+        }
     }
 
     // MARK: - Search header
@@ -71,12 +80,12 @@ struct ListsSearchView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 1) {
                     if results.isEmpty {
-                        Text(model.notes.isEmpty ? "No lists yet" : "No matches")
+                        Text(LocalizedStringKey(model.recentNotes.isEmpty ? "No lists yet" : "No matches"))
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 32)
                     } else {
-                        Text(search.isEmpty ? "Recent Lists" : "Results")
+                        Text(LocalizedStringKey(search.isEmpty ? "Recent Lists" : "Results"))
                             .font(.caption).fontWeight(.semibold)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 14)
@@ -87,7 +96,7 @@ struct ListsSearchView: View {
                             ListRow(
                                 note: note,
                                 selected: note.id == selectedID,
-                                onDelete: { model.delete(note) }
+                                onDelete: { noteToDelete = note }
                             )
                             .id(note.id)
                             // A row scrolled under a resting pointer isn't a hover: that would
@@ -116,7 +125,7 @@ struct ListsSearchView: View {
     private var footer: some View {
         HStack(spacing: 10) {
             Image(systemName: "checklist").font(.system(size: 13)).foregroundStyle(.secondary)
-            Text("Tic Lists").font(.caption).foregroundStyle(.secondary)
+            Text("Tico Lists").font(.caption).foregroundStyle(.secondary)
             Spacer()
             hint("Navigate", "↑↓")
             hint("Open", "↩")
@@ -128,7 +137,7 @@ struct ListsSearchView: View {
 
     private func hint(_ label: String, _ key: String) -> some View {
         HStack(spacing: 5) {
-            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(LocalizedStringKey(label)).font(.caption).foregroundStyle(.secondary)
             Text(key)
                 .font(.caption2)
                 .padding(.horizontal, 5)
@@ -165,7 +174,7 @@ private struct ListRow: View {
     let onDelete: () -> Void
 
     @State private var hover = false
-    @State private var confirming = false
+    @AppStorage("clipboardNoteID") private var clipboardNoteID = ""
 
     private var title: String { note.title.isEmpty ? "Untitled List" : note.title }
 
@@ -178,10 +187,16 @@ private struct ListRow: View {
 
             Text(title).lineLimit(1)
 
+            if clipboardNoteID == note.id.uuidString {
+                Image(systemName: "doc.on.clipboard")
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(Text("剪贴板便签"))
+            }
+
             Spacer(minLength: 8)
 
             if hover || selected {
-                Button { confirming = true } label: {
+                Button(action: onDelete) {
                     Image(systemName: "trash").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -199,11 +214,5 @@ private struct ListRow: View {
         )
         .contentShape(Rectangle())
         .onHover { hover = $0 }
-        .confirmationDialog("Delete “\(title)”?", isPresented: $confirming, titleVisibility: .visible) {
-            Button("Delete List", role: .destructive, action: onDelete)
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This permanently deletes the list and its tasks.")
-        }
     }
 }

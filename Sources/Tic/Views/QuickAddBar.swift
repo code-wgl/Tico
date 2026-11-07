@@ -80,7 +80,7 @@ struct QuickAddBar: View {
             )
             .overlay(alignment: .topLeading) {
                 if newTaskText.isEmpty {
-                    Text(effectiveNewTaskLevel > 0 ? "Add a subtask…" : "Add a task…")
+                    Text(LocalizedStringKey(effectiveNewTaskLevel > 0 ? "Add a subtask…" : "Add a task…"))
                         .foregroundStyle(theme.secondary)
                         .padding(.top, PlainTextEditor.topInset)   // align with the editor's text inset
                         .allowsHitTesting(false)

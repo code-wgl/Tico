@@ -13,7 +13,7 @@ struct AppDatabaseTests {
 
         let notes = try await db.allNotes()
         #expect(notes.count == 2)
-        #expect(notes.map(\.title) == ["Welcome to Tic 👋", "Shortcuts ⌨️"])
+        #expect(notes.map(\.title) == ["Welcome to Tico 👋", "Shortcuts ⌨️"])
 
         let welcome = try #require(notes.first)
         let tasks = try await db.tasks(noteId: welcome.id)

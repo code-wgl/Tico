@@ -7,6 +7,7 @@ let package = Package(
         .macOS(.v14)
     ],
     dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-markdown.git", exact: "0.7.3"),
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", .upToNextMinor(from: "0.12.1"))
     ],
@@ -14,6 +15,7 @@ let package = Package(
         .executableTarget(
             name: "Tic",
             dependencies: [
+                .product(name: "Markdown", package: "swift-markdown"),
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "MCP", package: "swift-sdk")
             ],

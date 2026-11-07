@@ -3,11 +3,14 @@ import SwiftUI
 
 /// Shared layout constants so the SwiftUI collapsed bar and the AppKit window resize agree.
 enum NoteLayout {
-    /// Height of a rolled-up note — exactly its header's top row (a capsule it draws itself — see
-    /// `NotePanel.setRolledUp`).
-    static let collapsedHeight: CGFloat = 34
-    /// The shortest an open note can be resized to (`NoteWindowManager.windowWillResize`).
-    static let minExpandedHeight: CGFloat = 160
+    /// Size the initial bar from its title font, with a small vertical inset.
+    static let collapsedFontSize: CGFloat = 9.5
+    static let collapsedHeight: CGFloat = {
+        let font = NSFont.systemFont(ofSize: collapsedFontSize, weight: .semibold)
+        return ceil(font.ascender - font.descender + font.leading) + 1
+    }()
+    static let minimumCollapsedHeight: CGFloat = 8
+    static let minimumCollapsedWidth: CGFloat = 36
     /// Horizontal inset added per nesting level, so subtasks step to the right of their parent.
     static let indentStep: CGFloat = 20
     /// Horizontal inset of task rows from the note's edges — room for the drag grip and the drop
@@ -38,9 +41,12 @@ enum NoteLayout {
 struct NoteView: View {
     @Bindable var controller: NoteController
 
-    @State private var titleText: String
+    @State private var markdownText: String
+    @State private var markdownContentHeight: CGFloat = 28
+    @State private var taskInsertRequest = 0
     @State private var revealed = false
-    @State private var atBarHeight = false
+    @State private var showCloseConfirm = false
+    @AppStorage("clipboardNoteID") private var clipboardNoteID = ""
     @State private var drag: ReorderDrag
     // True while a reorder gesture is live. SwiftUI resets it when the gesture ends *or is cancelled*;
     // a cancel never reaches `onEnded`, so this is what puts the task back instead of leaving it lifted.
@@ -58,7 +64,7 @@ struct NoteView: View {
     @State private var activeSectionID: TaskItem.ID?
     // The task whose image is under the pointer or being cropped; its row's reorder drag is paused.
     @State private var imageInteractionTaskID: TaskItem.ID?
-    @State private var renamingTitle = false
+    @State private var completingTaskIDs: Set<UUID> = []
 
     private static let listSpace = "tic.tasklist"
 
@@ -70,52 +76,201 @@ struct NoteView: View {
     /// `drag` is injectable so tests can watch a reorder drag's state.
     init(controller: NoteController, drag: ReorderDrag = ReorderDrag()) {
         self.controller = controller
-        _titleText = State(initialValue: controller.note.title)
+        _markdownText = State(initialValue: controller.note.markdown)
         _drag = State(initialValue: drag)
     }
 
     private var note: Note { controller.note }
     private var isDragging: Bool { drag.taskID != nil }
+    private var isClipboardNote: Bool { clipboardNoteID == note.id.uuidString }
 
     private var theme: NoteTheme {
         NoteTheme(color: note.color, surface: note.material == .glass ? .glass : .solid)
     }
 
     var body: some View {
+        Group {
+            if note.isCollapsed {
+                collapsedBar
+            } else {
+                expandedBody
+            }
+        }
+        // Keep the editor state current even while its expanded view is unmounted.
+        // Clipboard captures can arrive while the note is rolled up.
+        .onChange(of: controller.note.markdown) { _, value in
+            if markdownText != value { markdownText = value }
+        }
+        .onChange(of: note.isCollapsed) { _, collapsed in
+            if !collapsed && markdownText != controller.note.markdown {
+                markdownText = controller.note.markdown
+            }
+        }
+        .onChange(of: controller.closeConfirmationRequest) { _, _ in
+            presentCloseConfirmation()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(NoteBackground(color: note.color, material: note.material).opacity(note.backgroundOpacity ?? 1))
+        .overlay(alignment: .topTrailing) {
+            if isClipboardNote && !note.isCollapsed {
+                Image(systemName: "doc.on.clipboard")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(theme.secondary.opacity(0.7))
+                    .frame(width: 14, height: 14)
+                    .padding(.trailing, 9)
+                    .allowsHitTesting(false)
+                    .accessibilityLabel(Text("剪贴板便签"))
+            }
+        }
+        .overlay {
+            if showCloseConfirm && !note.isCollapsed {
+                Color.black.opacity(0.38).ignoresSafeArea().transition(.opacity)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: note.isCollapsed ? 5 : 0))
+        .ignoresSafeArea()
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) { revealed = hovering }
+        }
+    }
+
+    // MARK: - Collapsed bar
+
+    private var collapsedBar: some View {
+        let firstLine = markdownText.components(separatedBy: .newlines).first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let unmarkedTitle = firstLine.replacingOccurrences(of: #"^#{1,6}\s+"#, with: "", options: .regularExpression)
+        let compactTitle = unmarkedTitle.isEmpty ? (note.title.isEmpty ? "Untitled List" : note.title) : unmarkedTitle
+        let markdownRemaining = markdownText.components(separatedBy: .newlines).filter {
+            $0.range(of: #"^\s*[-*+] \[ \](\s|$)"#, options: .regularExpression) != nil
+        }.count
+        let remaining = controller.tasks.filter { !$0.isDone }.count + markdownRemaining
+        return GeometryReader { geometry in
+            let height = geometry.size.height
+            let fontSize = min(20, max(6, height - 3), NoteLayout.collapsedFontSize + max(0, height - 14) * 0.1)
+            HStack(alignment: .center, spacing: 6) {
+                Text(compactTitle)
+                    .font(.system(size: fontSize, weight: .semibold))
+                    .foregroundStyle(theme.title)
+                    .lineLimit(nil)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .layoutPriority(1)
+
+                if remaining > 0 && geometry.size.width >= 75 {
+                    Text("\(remaining)")
+                        .font(.system(size: max(8, fontSize - 1), weight: .semibold))
+                        .foregroundStyle(theme.secondary)
+                        .padding(.horizontal, 7)
+                        .fixedSize()
+                        .background(Capsule().fill(theme.accent.opacity(0.18)))
+                }
+            }
+            .padding(.horizontal, geometry.size.width < 75 ? 6 : 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .clipped()
+            .allowsHitTesting(false)   // let the drag handle below receive all clicks
+            .background(WindowMoveArea(onDoubleClick: { controller.toggleCollapsed() }, allowCompactResize: true))
+            .help("Drag to move · double-click to expand")
+        }
+    }
+
+    // MARK: - Expanded body
+
+    private var expandedBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             NoteHeaderView(
                 controller: controller,
                 theme: theme,
-                isRevealed: revealed,
-                isRolledUp: showsBar,
-                titleText: $titleText,
-                isRenaming: $renamingTitle
+                isRevealed: revealed
             )
-            // Rolled up, the header's top row is all that's left: the window closes over the rest like a
-            // shade, and the list leaves only once it's shut, so nothing moves and nothing hidden keeps focus.
-            if !showsBar {
-                taskList
-                QuickAddBar(controller: controller, theme: theme)
+            GeometryReader { geometry in
+                VStack(spacing: 0) {
+                    markdownBody
+                        .frame(height: controller.tasks.isEmpty ? geometry.size.height : markdownHeight(in: geometry.size.height))
+                    if !controller.tasks.isEmpty { taskList }
+                }
             }
+            if controller.pendingImage != nil { QuickAddBar(controller: controller, theme: theme) }
+            NoteHeaderView(
+                controller: controller, theme: theme, isRevealed: revealed, toolbarOnly: true,
+                onAddTask: addTask, onClose: presentCloseConfirmation
+            )
         }
-        // `minHeight: 0`: the window opens from a bar, and the hosting view won't let it be shorter than the
-        // content's minimum — it jumped straight to ~150pt. The resize delegate keeps open notes taller.
-        .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .topLeading)
-        .onGeometryChange(for: Bool.self) { $0.size.height <= NoteLayout.collapsedHeight + 0.5 } action: {
-            atBarHeight = $0
-        }
-        .background(NoteBackground(
-            color: note.color, material: note.material,
-            cornerRadius: note.isCollapsed ? NoteLayout.collapsedHeight / 2 : 0
-        ))
-        .background(HoverArea { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) { revealed = hovering }
-        })
-        .ignoresSafeArea()
+        .onChange(of: markdownText) { _, value in controller.updateMarkdown(value) }
+        .onChange(of: controller.addTaskRequest) { _, _ in addTask() }
+        .onChange(of: controller.headingRequest) { _, _ in toggleFirstLineHeading() }
     }
 
-    /// Rolled up and done rolling: the window is down to the bar.
-    private var showsBar: Bool { note.isCollapsed && atBarHeight }
+    private func presentCloseConfirmation() {
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        let content = markdownText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let blankHeading = content.range(of: #"^#{1,6}\s*$"#, options: .regularExpression) != nil
+        let hiddenCount = hiddenCompletedTaskCount
+        if hiddenCount == 0 && controller.tasks.isEmpty && (content.isEmpty || blankHeading) {
+            controller.requestClose()
+            return
+        }
+        if note.isCollapsed { controller.toggleCollapsed() }
+        withAnimation(.easeOut(duration: 0.1)) { showCloseConfirm = true }
+        controller.onPresentCloseConfirmation?(hiddenCount) {
+            withAnimation(.easeOut(duration: 0.1)) { showCloseConfirm = false }
+        }
+    }
+
+    private var hiddenCompletedTaskCount: Int {
+        guard note.hideCompleted else { return 0 }
+        var inCodeBlock = false
+        var count = controller.tasks.filter(\.isDone).count
+        for line in markdownText.components(separatedBy: .newlines) {
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                inCodeBlock.toggle()
+            } else if !inCodeBlock && line.range(of: #"^[ \t]*[-*+] \[[xX]\](?:[ \t]+|$)"#, options: .regularExpression) != nil {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    private func addTask() {
+        taskInsertRequest += 1
+    }
+
+    private func markdownHeight(in available: CGFloat) -> CGFloat {
+        if markdownText.isEmpty { return 14 }
+        return min(max(24, markdownContentHeight), max(24, available * 0.55))
+    }
+
+    private var markdownBody: some View {
+        MarkdownNoteEditor(text: $markdownText, textColor: theme.task, paperColor: note.color.fill, inlineImages: controller.inlineImages,
+                           focusRequest: controller.markdownFocusRequest,
+                           taskInsertRequest: taskInsertRequest,
+                           separateCompletedTasks: note.moveCompletedToBottom,
+                           hideCompletedTasks: note.hideCompleted,
+                           trackAnimatedContentHeight: !controller.tasks.isEmpty,
+                           onFocusHandled: controller.clearMarkdownFocusRequest,
+                           onAddTask: addTask,
+                           onPasteImage: { data, completion in
+                               Task { if let result = await controller.storeInlineImage(data) { completion(result.0, result.1) } }
+                           },
+                           onContentHeightChange: { markdownContentHeight = $0 })
+            .padding(.horizontal, 12)
+            .help("Write a note in Markdown")
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var firstLineIsHeading: Bool {
+        let first = markdownText.split(separator: "\n", omittingEmptySubsequences: false).first ?? ""
+        let hashes = first.prefix(while: { $0 == "#" }).count
+        return (1...6).contains(hashes) && first.dropFirst(hashes).first == " "
+    }
+
+    private func toggleFirstLineHeading() {
+        if firstLineIsHeading {
+            let count = markdownText.prefix(while: { $0 == "#" }).count
+            markdownText.removeFirst(count + 1)
+        } else {
+            markdownText = "# " + markdownText
+        }
+    }
 
     // MARK: - Task list
 
@@ -126,7 +281,11 @@ struct NoteView: View {
         #if DEBUG
         Self.taskListRenders += 1
         #endif
-        let display = isDragging ? dragRows : controller.displayedTasks
+        let display: [TaskItem] = {
+            if isDragging { return dragRows }
+            guard note.hideCompleted, !completingTaskIDs.isEmpty else { return controller.displayedTasks }
+            return controller.tasks.filter { !$0.isDone || completingTaskIDs.contains($0.id) }
+        }()
         let add = activeAdd
         let dropParent = dropParentID
         return ScrollViewReader { proxy in
@@ -134,6 +293,7 @@ struct NoteView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(display.enumerated()), id: \.element.id) { index, task in
                         row(task, isDropParent: task.id == dropParent)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                         if let add, add.afterIndex == index {
                             AddSubtaskRow(
                                 theme: theme,
@@ -150,6 +310,7 @@ struct NoteView: View {
                 }
                 .padding(.top, 4)
                 .padding(.bottom, 12)   // breathing room so the last row never crowds the quick-add bar
+                .background(NoteScrollerInstaller(color: theme.secondary))
                 .coordinateSpace(.named(Self.listSpace))
                 .overlay(alignment: .topLeading) { dragOverlay(parentID: dropParent) }
                 .onPreferenceChange(RowFrame.Key.self) { rowFrames = $0 }
@@ -176,14 +337,10 @@ struct NoteView: View {
                 // commits first; only a cancelled drag is still in flight here, and it's put back.
                 if !active { Task { @MainActor in cancelDrag() } }
             }
-            .onChange(of: controller.note.title) { _, newTitle in
-                // An agent (or another writer) renamed the note: reflect it unless the user is mid-edit.
-                if !renamingTitle { titleText = newTitle }
-            }
             .overlay(alignment: .top) {
                 if display.isEmpty {
-                    Text(controller.tasks.isEmpty
-                         ? "No tasks yet — add one below" : "All done — completed tasks hidden")
+                    Text(LocalizedStringKey(controller.tasks.isEmpty
+                         ? "No tasks yet — use the add task button" : "All done — completed tasks hidden"))
                         .font(.callout)
                         .foregroundStyle(theme.secondary)
                         .padding(.top, 12)
@@ -288,7 +445,22 @@ struct NoteView: View {
             theme: theme,
             autoEdit: task.id == addingRowID,
             canReorder: controller.isReorderable,
-            onToggle: { controller.toggle(task) },
+            onToggle: {
+                if note.hideCompleted {
+                    let updated = TaskOutline.applyingToggle(controller.tasks, toggling: task.id, now: Date())
+                    let newlyCompleted = Set(zip(controller.tasks, updated).compactMap { old, new in
+                        !old.isDone && new.isDone ? new.id : nil
+                    })
+                    completingTaskIDs.formUnion(newlyCompleted)
+                    if !newlyCompleted.isEmpty {
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(160))
+                            withAnimation(.easeInOut(duration: 0.30)) { completingTaskIDs.subtract(newlyCompleted) }
+                        }
+                    }
+                }
+                controller.toggle(task)
+            },
             onCommit: { controller.commitText(task, $0) },
             onDelete: { controller.delete(task) },
             onIndent: { controller.indent(task) },

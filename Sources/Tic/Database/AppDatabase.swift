@@ -14,14 +14,15 @@ final class AppDatabase: Sendable {
 
     // MARK: - Setup
 
-    /// `~/Library/Application Support/Tic/` — home of the database and the MCP socket.
+    /// Stable and development builds use separate databases and MCP sockets.
     static func supportDirectory() throws -> URL {
         let fm = FileManager.default
         let appSupport = try fm.url(
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true
         )
-        let dir = appSupport.appendingPathComponent("Tic", isDirectory: true)
+        let directory = Bundle.main.bundleIdentifier == "com.kasvith.tic" ? "Tic" : "Tic-Development"
+        let dir = appSupport.appendingPathComponent(directory, isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -46,10 +47,8 @@ final class AppDatabase: Sendable {
 
     private var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
-        #if DEBUG
-        // During development, wipe and rebuild when the schema changes instead of crashing.
-        migrator.eraseDatabaseOnSchemaChange = true
-        #endif
+        // Never erase the user's database in a debug build: this app opens the same on-disk
+        // store from both debug and release builds, and new migrations must preserve notes.
 
         migrator.registerMigration("v1_notes_and_tasks") { db in
             try db.create(table: "note") { t in
@@ -119,24 +118,71 @@ final class AppDatabase: Sendable {
             }
         }
 
-        // Sync between Macs is per list and off until chosen; an image's content hash names its file in
-        // the sync folder (filled in on write, or lazily by the first sync for images saved before this).
-        migrator.registerMigration("v6_sync") { db in
+        migrator.registerMigration("v6_note_markdown") { db in
             try db.alter(table: "note") { t in
-                t.add(column: "isSynced", .boolean).notNull().defaults(to: false)
+                t.add(column: "markdown", .text).notNull().defaults(to: "")
             }
-            try db.alter(table: "taskImage") { t in
-                t.add(column: "hash", .text)
+        }
+
+        migrator.registerMigration("v7_clipboard_entries") { db in
+            try db.create(table: "clipboardEntry") { t in
+                t.primaryKey("id", .blob).notNull()
+                t.column("noteId", .blob).notNull().references("note", onDelete: .cascade)
+                t.column("text", .text).notNull().defaults(to: "")
+                t.column("imageData", .blob)
+                t.column("createdAt", .datetime).notNull()
             }
-            // Lists deleted while not synced, noted at the moment of deletion: a sync switched off just
-            // before the delete may not have been recorded yet, and only this Mac's copy should go.
-            try db.create(table: "syncLocalDelete") { t in
-                t.primaryKey("noteId", .blob).notNull()
+            try db.create(index: "clipboardEntry_on_noteId", on: "clipboardEntry", columns: ["noteId"])
+        }
+
+        migrator.registerMigration("v8_clipboard_thumbnails") { db in
+            try db.alter(table: "clipboardEntry") { t in
+                t.add(column: "thumbnail", .blob)
             }
-            try db.execute(sql: """
-                CREATE TRIGGER note_deleted_unsynced AFTER DELETE ON note WHEN OLD.isSynced = 0
-                BEGIN INSERT OR IGNORE INTO syncLocalDelete (noteId) VALUES (OLD.id); END
-                """)
+        }
+
+        migrator.registerMigration("v9_inline_note_images") { db in
+            try db.create(table: "noteInlineImage") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("noteId", .blob).notNull().references("note", onDelete: .cascade)
+                t.column("data", .blob).notNull()
+                t.column("thumbnail", .blob)
+            }
+            try db.create(index: "noteInlineImage_on_noteId", on: "noteInlineImage", columns: ["noteId"])
+
+            let notes = try Note.fetchAll(db)
+            for note in notes {
+                let entries = try ClipboardEntry.fetchAll(db, sql: """
+                    SELECT id, noteId, text, imageData, createdAt FROM clipboardEntry
+                    WHERE noteId = ? ORDER BY createdAt DESC, rowid DESC
+                    """, arguments: [note.id])
+                guard !entries.isEmpty else { continue }
+                var pieces: [String] = []
+                for entry in entries {
+                    var item: [String] = []
+                    if !entry.text.isEmpty { item.append(entry.text) }
+                    if let data = entry.imageData {
+                        let id = entry.id.uuidString
+                        let thumbnail = TaskImage.thumbnail(data).flatMap(TaskImage.pngData)
+                        try db.execute(sql: "INSERT INTO noteInlineImage (id, noteId, data, thumbnail) VALUES (?, ?, ?, ?)",
+                                       arguments: [id, note.id, data, thumbnail])
+                        item.append(ClipboardContent.imageReference(id))
+                    }
+                    if !item.isEmpty { pieces.append(item.joined(separator: "\n")) }
+                }
+                if !pieces.isEmpty {
+                    let markdown = ClipboardContent.prepending(pieces.joined(separator: "\n\n"), to: note.markdown, fallbackTitle: note.title)
+                    try db.execute(sql: "UPDATE note SET markdown = ?, updatedAt = ? WHERE id = ?",
+                                   arguments: [markdown, Date(), note.id])
+                }
+            }
+            try db.execute(sql: "DELETE FROM clipboardEntry")
+        }
+
+        migrator.registerMigration("v10_note_background_opacity") { db in
+            try db.alter(table: "note") { t in
+                t.add(column: "backgroundOpacity", .double).defaults(to: 1)
+            }
         }
 
         return migrator
@@ -220,6 +266,16 @@ final class AppDatabase: Sendable {
         }
     }
 
+    /// A separate write keeps a text edit from overwriting a concurrent window or task change.
+    func updateNoteMarkdown(id: UUID, markdown: String, title: String) async throws {
+        try await dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE note SET markdown = ?, title = ?, updatedAt = ? WHERE id = ?",
+                arguments: [markdown, title, Date(), id]
+            )
+        }
+    }
+
     /// Targeted write of a note's appearance (colour + material).
     func updateNoteAppearance(id: UUID, color: NoteColor, material: NoteMaterial) async throws {
         try await dbQueue.write { db in
@@ -227,6 +283,13 @@ final class AppDatabase: Sendable {
                 sql: "UPDATE note SET color = ?, material = ?, updatedAt = ? WHERE id = ?",
                 arguments: [color.rawValue, material.rawValue, Date(), id]
             )
+        }
+    }
+
+    func updateNoteBackgroundOpacity(id: UUID, opacity: Double) async throws {
+        try await dbQueue.write { db in
+            try db.execute(sql: "UPDATE note SET backgroundOpacity = ?, updatedAt = ? WHERE id = ?",
+                           arguments: [opacity, Date(), id])
         }
     }
 
@@ -247,13 +310,6 @@ final class AppDatabase: Sendable {
                 sql: "UPDATE note SET isOpen = ? WHERE id = ?",
                 arguments: [isOpen, id]
             )
-        }
-    }
-
-    /// Targeted write of whether a list syncs with the user's other Macs (Settings › Sync, or ⋯).
-    func updateNoteSynced(id: UUID, isSynced: Bool) async throws {
-        try await dbQueue.write { db in
-            try db.execute(sql: "UPDATE note SET isSynced = ? WHERE id = ?", arguments: [isSynced, id])
         }
     }
 
@@ -289,6 +345,13 @@ final class AppDatabase: Sendable {
         ValueObservation
             .tracking { db in try Note.order(Note.Columns.sortIndex).fetchAll(db) }
             .values(in: dbQueue)
+    }
+
+    /// A task-only note is not empty, including tasks that contain an image instead of text.
+    func observeNoteIDsWithTasks() -> AsyncValueObservation<[UUID]> {
+        ValueObservation.tracking { db in
+            try UUID.fetchAll(db, sql: "SELECT DISTINCT noteId FROM task")
+        }.values(in: dbQueue)
     }
 }
 
@@ -329,7 +392,7 @@ extension AppDatabase {
 
             try seed(
                 Note(
-                    title: "Welcome to Tic 👋", color: .yellow, material: .solid,
+                    title: "Welcome to Tico 👋", color: .yellow, material: .solid,
                     frameX: 130, frameY: 200, frameW: 300, frameH: 440, sortIndex: 0
                 ),
                 [
@@ -337,12 +400,12 @@ extension AppDatabase {
                     SeedTask("Break big tasks into subtasks", 0, false),
                     SeedTask("Hover a row and click the + below it", 1, false),
                     SeedTask("…or press Shift-Tab while editing", 1, false),
-                    SeedTask("*Markdown* — **bold**, `code`, ~~strike~~, [links](https://kasvith.me)", 0, false),
+                    SeedTask("*Markdown* — **bold**, `code`, ~~strike~~, [links](https://github.com/code-wgl/Tico)", 0, false),
                     SeedTask("Need detail? Press Shift-Return\nfor a new line in the same task", 0, false),
                     SeedTask("Completing a parent completes its subtasks", 0, true),
                     SeedTask("buy milk", 1, true),
                     SeedTask("water the plants", 1, true),
-                    SeedTask("⭐️ Star Tic on [GitHub](https://github.com/kasvith/tic)", 0, false),
+                    SeedTask("⭐️ Star Tico on [GitHub](https://github.com/code-wgl/Tico)", 0, false),
                 ]
             )
 

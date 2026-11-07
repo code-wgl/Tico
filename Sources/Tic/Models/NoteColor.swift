@@ -9,6 +9,12 @@ enum NoteColor: String, Codable, CaseIterable, Identifiable, Sendable {
     case green
     case purple
     case graphite
+    case orange
+    case coral
+    case mint
+    case teal
+    case cream
+    case white
 
     var id: String { rawValue }
 
@@ -25,6 +31,12 @@ enum NoteColor: String, Codable, CaseIterable, Identifiable, Sendable {
         case .green:    return Color(red: 0.76, green: 0.93, blue: 0.74)
         case .purple:   return Color(red: 0.84, green: 0.79, blue: 0.97)
         case .graphite: return Color(red: 0.86, green: 0.87, blue: 0.90)
+        case .orange: return Color(red: 1.00, green: 0.83, blue: 0.67)
+        case .coral: return Color(red: 1.00, green: 0.76, blue: 0.73)
+        case .mint: return Color(red: 0.75, green: 0.93, blue: 0.85)
+        case .teal: return Color(red: 0.69, green: 0.91, blue: 0.92)
+        case .cream: return Color(red: 0.98, green: 0.94, blue: 0.79)
+        case .white: return Color(red: 0.96, green: 0.96, blue: 0.97)
         }
     }
 
@@ -37,6 +49,12 @@ enum NoteColor: String, Codable, CaseIterable, Identifiable, Sendable {
         case .green:    return Color(red: 0.26, green: 0.58, blue: 0.30)
         case .purple:   return Color(red: 0.46, green: 0.36, blue: 0.74)
         case .graphite: return Color(red: 0.40, green: 0.42, blue: 0.46)
+        case .orange: return Color(red: 0.75, green: 0.39, blue: 0.16)
+        case .coral: return Color(red: 0.78, green: 0.33, blue: 0.31)
+        case .mint: return Color(red: 0.24, green: 0.59, blue: 0.43)
+        case .teal: return Color(red: 0.17, green: 0.53, blue: 0.56)
+        case .cream: return Color(red: 0.65, green: 0.53, blue: 0.29)
+        case .white: return Color(red: 0.47, green: 0.49, blue: 0.54)
         }
     }
 
@@ -47,57 +65,57 @@ enum NoteColor: String, Codable, CaseIterable, Identifiable, Sendable {
 
     private var solidTitleInk: Color {
         switch self {
-        case .yellow:   return Color(red: 0.20, green: 0.16, blue: 0.02)
-        case .pink:     return Color(red: 0.30, green: 0.10, blue: 0.16)
-        case .blue:     return Color(red: 0.06, green: 0.16, blue: 0.30)
-        case .green:    return Color(red: 0.08, green: 0.22, blue: 0.10)
+        case .yellow, .orange, .cream: return Color(red: 0.20, green: 0.16, blue: 0.02)
+        case .pink, .coral: return Color(red: 0.30, green: 0.10, blue: 0.16)
+        case .blue, .teal: return Color(red: 0.06, green: 0.16, blue: 0.30)
+        case .green, .mint: return Color(red: 0.08, green: 0.22, blue: 0.10)
         case .purple:   return Color(red: 0.20, green: 0.12, blue: 0.36)
-        case .graphite: return Color(red: 0.10, green: 0.11, blue: 0.14)
+        case .graphite, .white: return Color(red: 0.10, green: 0.11, blue: 0.14)
         }
     }
 
     private var solidTaskInk: Color {
         switch self {
-        case .yellow:   return Color(red: 0.24, green: 0.19, blue: 0.04)
-        case .pink:     return Color(red: 0.27, green: 0.12, blue: 0.17)
-        case .blue:     return Color(red: 0.08, green: 0.18, blue: 0.32)
-        case .green:    return Color(red: 0.10, green: 0.24, blue: 0.12)
+        case .yellow, .orange, .cream: return Color(red: 0.24, green: 0.19, blue: 0.04)
+        case .pink, .coral: return Color(red: 0.27, green: 0.12, blue: 0.17)
+        case .blue, .teal: return Color(red: 0.08, green: 0.18, blue: 0.32)
+        case .green, .mint: return Color(red: 0.10, green: 0.24, blue: 0.12)
         case .purple:   return Color(red: 0.22, green: 0.14, blue: 0.38)
-        case .graphite: return Color(red: 0.14, green: 0.15, blue: 0.18)
+        case .graphite, .white: return Color(red: 0.14, green: 0.15, blue: 0.18)
         }
     }
 
     /// Secondary / placeholder / empty-state text. Muting is baked in — do NOT add extra opacity.
     private var solidSecondaryInk: Color {
         switch self {
-        case .yellow:   return Color(red: 0.42, green: 0.35, blue: 0.12)
-        case .pink:     return Color(red: 0.50, green: 0.28, blue: 0.34)
-        case .blue:     return Color(red: 0.24, green: 0.36, blue: 0.50)
-        case .green:    return Color(red: 0.26, green: 0.40, blue: 0.26)
+        case .yellow, .orange, .cream: return Color(red: 0.42, green: 0.35, blue: 0.12)
+        case .pink, .coral: return Color(red: 0.50, green: 0.28, blue: 0.34)
+        case .blue, .teal: return Color(red: 0.24, green: 0.36, blue: 0.50)
+        case .green, .mint: return Color(red: 0.26, green: 0.40, blue: 0.26)
         case .purple:   return Color(red: 0.40, green: 0.32, blue: 0.55)
-        case .graphite: return Color(red: 0.40, green: 0.42, blue: 0.47)
+        case .graphite, .white: return Color(red: 0.40, green: 0.42, blue: 0.47)
         }
     }
 
     private var solidCompletedInk: Color {
         switch self {
-        case .yellow:   return Color(red: 0.46, green: 0.40, blue: 0.20)
-        case .pink:     return Color(red: 0.55, green: 0.34, blue: 0.40)
-        case .blue:     return Color(red: 0.34, green: 0.45, blue: 0.58)
-        case .green:    return Color(red: 0.36, green: 0.48, blue: 0.36)
+        case .yellow, .orange, .cream: return Color(red: 0.46, green: 0.40, blue: 0.20)
+        case .pink, .coral: return Color(red: 0.55, green: 0.34, blue: 0.40)
+        case .blue, .teal: return Color(red: 0.34, green: 0.45, blue: 0.58)
+        case .green, .mint: return Color(red: 0.36, green: 0.48, blue: 0.36)
         case .purple:   return Color(red: 0.48, green: 0.42, blue: 0.62)
-        case .graphite: return Color(red: 0.48, green: 0.50, blue: 0.55)
+        case .graphite, .white: return Color(red: 0.48, green: 0.50, blue: 0.55)
         }
     }
 
     private var solidCheckbox: Color {
         switch self {
-        case .yellow:   return Color(red: 0.78, green: 0.62, blue: 0.10)
-        case .pink:     return Color(red: 0.78, green: 0.30, blue: 0.45)
-        case .blue:     return Color(red: 0.13, green: 0.42, blue: 0.72)
-        case .green:    return Color(red: 0.18, green: 0.50, blue: 0.24)
+        case .yellow, .orange, .cream: return Color(red: 0.78, green: 0.62, blue: 0.10)
+        case .pink, .coral: return Color(red: 0.78, green: 0.30, blue: 0.45)
+        case .blue, .teal: return Color(red: 0.13, green: 0.42, blue: 0.72)
+        case .green, .mint: return Color(red: 0.18, green: 0.50, blue: 0.24)
         case .purple:   return Color(red: 0.42, green: 0.30, blue: 0.72)
-        case .graphite: return Color(red: 0.30, green: 0.40, blue: 0.78)
+        case .graphite, .white: return Color(red: 0.30, green: 0.40, blue: 0.78)
         }
     }
 

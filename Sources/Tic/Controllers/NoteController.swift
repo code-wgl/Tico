@@ -11,10 +11,14 @@ final class NoteController {
     let noteID: UUID
     private(set) var note: Note
     private(set) var tasks: [TaskItem] = []
+    private(set) var inlineImages: [String: Data] = [:]
+    private(set) var markdownFocusRequest = 0
+    private(set) var addTaskRequest = 0
+    private(set) var headingRequest = 0
+    private(set) var closeConfirmationRequest = 0
+    private(set) var isMaximized = false
     /// The crop of each task's image, keyed by task id — a key's presence means the task has an image.
     private(set) var imageCrops: [UUID: CGRect] = [:]
-    /// Each image's content hash, to spot a replaced image whose crop didn't change.
-    @ObservationIgnored private var imageHashes: [UUID: String] = [:]
     /// Downsampled, uncropped bitmaps for drawing images on the note, loaded lazily per task.
     private(set) var thumbnails: [UUID: CGImage] = [:]
 
@@ -22,6 +26,15 @@ final class NoteController {
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private var noteObservation: Task<Void, Never>?
     @ObservationIgnored private var imageObservation: Task<Void, Never>?
+    @ObservationIgnored private var inlineImageObservation: Task<Void, Never>?
+    @ObservationIgnored private var markdownSave: Task<Void, Never>?
+    @ObservationIgnored private var behaviorSave: Task<Void, Never>?
+    @ObservationIgnored private var opacitySave: Task<Void, Never>?
+    @ObservationIgnored private var pendingOpacity: Double?
+    @ObservationIgnored private var opacityRevision = 0
+    @ObservationIgnored private var pendingBehavior: (floating: Bool, allSpaces: Bool, collapsed: Bool)?
+    @ObservationIgnored private var behaviorRevision = 0
+    @ObservationIgnored private var lastMarkdownSubmitted: String
     @ObservationIgnored private var loadingThumbnails: Set<UUID> = []
 
     /// Re-applies window behaviour (floatOnTop, showOnAllSpaces) to the live panel. Set by
@@ -30,12 +43,15 @@ final class NoteController {
 
     /// Asks the manager to close (hide) this note's panel. Does NOT delete the note.
     @ObservationIgnored var onClose: (() -> Void)?
+    @ObservationIgnored var onPresentCloseConfirmation: ((Int, @escaping () -> Void) -> Void)?
 
     /// Asks the manager to roll the live panel up/down to match `isCollapsed`.
     @ObservationIgnored var onSetCollapsed: ((Bool) -> Void)?
 
     /// Asks the manager to create a brand-new note (the in-note "+" button).
     @ObservationIgnored var onNewNote: (() -> Void)?
+    @ObservationIgnored var onToggleMaximize: (() -> Void)?
+    @ObservationIgnored var onDelete: (() -> Void)?
 
     /// Asks the manager to show a task's image (by task id) in the image window.
     @ObservationIgnored var onOpenImage: ((UUID) -> Void)?
@@ -44,10 +60,19 @@ final class NoteController {
         self.noteID = note.id
         self.note = note
         self.db = database
+        self.lastMarkdownSubmitted = note.markdown
     }
 
     /// Begins streaming this note's tasks; each emission replaces `tasks` and updates the UI.
     func start() {
+        inlineImageObservation?.cancel()
+        inlineImageObservation = Task { [weak self, db, noteID] in
+            do {
+                for try await images in db.observeInlineImages(noteID: noteID) {
+                    self?.inlineImages = Dictionary(uniqueKeysWithValues: images.map { ($0.id, $0.data) })
+                }
+            } catch { NSLog("[Tic] inline image observation ended: \(error)") }
+        }
         observation?.cancel()
         observation = Task { [weak self, db, noteID] in
             do {
@@ -73,8 +98,9 @@ final class NoteController {
         imageObservation?.cancel()
         imageObservation = Task { [weak self, db, noteID] in
             do {
-                for try await images in db.observeTaskImageCrops(noteId: noteID) {
-                    self?.applyObservedImages(images)
+                for try await crops in db.observeTaskImageCrops(noteId: noteID) {
+                    self?.imageCrops = crops
+                    self?.syncThumbnails()
                 }
             } catch {
                 NSLog("[Tic] image observation ended for \(noteID): \(error)")
@@ -83,6 +109,8 @@ final class NoteController {
     }
 
     func stop() {
+        inlineImageObservation?.cancel()
+        inlineImageObservation = nil
         observation?.cancel()
         observation = nil
         noteObservation?.cancel()
@@ -96,17 +124,103 @@ final class NoteController {
     /// is a no-op here (nothing double-applies).
     private func applyObservedNote(_ updated: Note) {
         let old = note
-        guard old != updated else { return }
-        note = updated
-        if old.floatOnTop != updated.floatOnTop || old.showOnAllSpaces != updated.showOnAllSpaces {
-            onApplyBehavior?(updated.floatOnTop, updated.showOnAllSpaces)
+        guard old != updated || pendingBehavior != nil else { return }
+        var merged = updated
+        if let pendingOpacity { merged.backgroundOpacity = pendingOpacity }
+        // Ignore stale database echoes while local edits are being serialized.
+        if updated.markdown != lastMarkdownSubmitted {
+            merged.markdown = note.markdown
+            merged.title = note.title
         }
-        if old.isCollapsed != updated.isCollapsed {
-            onSetCollapsed?(updated.isCollapsed)
+        if let pending = pendingBehavior {
+            merged.floatOnTop = pending.floating
+            merged.showOnAllSpaces = pending.allSpaces
+            merged.isCollapsed = pending.collapsed
+        }
+        note = merged
+        if old.floatOnTop != merged.floatOnTop || old.showOnAllSpaces != merged.showOnAllSpaces {
+            onApplyBehavior?(merged.floatOnTop, merged.showOnAllSpaces)
+        }
+        if old.isCollapsed != merged.isCollapsed {
+            onSetCollapsed?(merged.isCollapsed)
         }
     }
 
     // MARK: - Task actions
+
+    func requestMarkdownFocus() { markdownFocusRequest += 1 }
+    func clearMarkdownFocusRequest() { markdownFocusRequest = 0 }
+    func requestAddTask() { addTaskRequest += 1 }
+    func requestHeading() { headingRequest += 1 }
+    func setMaximized(_ value: Bool) { isMaximized = value }
+    func toggleMaximize() { onToggleMaximize?() }
+    func requestDelete() { onDelete?() }
+
+    func prependClipboardContent(_ content: String) async {
+        await markdownSave?.value
+        updateMarkdown(ClipboardContent.prepending(content, to: lastMarkdownSubmitted, fallbackTitle: note.title))
+        await markdownSave?.value
+    }
+
+    func appendMarkdownContent(_ content: String) async {
+        await markdownSave?.value
+        let separator = lastMarkdownSubmitted.isEmpty ? "" : "\n\n"
+        updateMarkdown(lastMarkdownSubmitted + separator + content)
+        await markdownSave?.value
+    }
+
+    func currentClipboardMarkdown() async -> String {
+        await markdownSave?.value
+        return lastMarkdownSubmitted
+    }
+
+    func flushPendingMarkdown() async { await markdownSave?.value }
+
+    func restoreClipboardTitle() async {
+        await markdownSave?.value
+        if let restored = ClipboardContent.restoringTitle(in: lastMarkdownSubmitted) {
+            updateMarkdown(restored.markdown)
+            await markdownSave?.value
+        }
+    }
+
+    func storeInlineImage(_ data: Data) async -> (String, Data)? {
+        let id = UUID().uuidString
+        let thumbnail = await Task.detached { () -> Data? in
+            TaskImage.thumbnail(data).flatMap(TaskImage.pngData)
+        }.value
+        do {
+            try await db.storeInlineImage(noteID: noteID, id: id, data: data, thumbnail: thumbnail)
+            let displayData = thumbnail ?? data
+            inlineImages[id] = displayData
+            return (ClipboardContent.imageReference(id), displayData)
+        } catch {
+            NSLog("[Tic] inline image save failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Serialize writes so a later keystroke cannot be replaced by an earlier database operation.
+    func updateMarkdown(_ markdown: String) {
+        guard lastMarkdownSubmitted != markdown else { return }
+        lastMarkdownSubmitted = markdown
+        note.markdown = markdown
+        let firstLine = markdown.split(separator: "\n", omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        var title = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hashes = title.prefix(while: { $0 == "#" }).count
+        if (1...6).contains(hashes), title.dropFirst(hashes).first == " " {
+            title = String(title.dropFirst(hashes + 1)).trimmingCharacters(in: .whitespaces)
+        }
+        title = title.isEmpty ? "Untitled Note" : String(title.prefix(120))
+        note.title = title
+        let savedTitle = title
+        let previous = markdownSave
+        markdownSave = Task { [db, noteID] in
+            await previous?.value
+            do { try await db.updateNoteMarkdown(id: noteID, markdown: markdown, title: savedTitle) }
+            catch { NSLog("[Tic] markdown save failed: \(error)") }
+        }
+    }
 
     /// Adds a task at the end. `level` is the requested nesting depth (from the quick-add field's
     /// pending indent); it's clamped to what the previous row allows so the outline stays valid.
@@ -134,10 +248,6 @@ final class NoteController {
     private(set) var pendingThumbnail: CGImage?
     /// Bumped to ask the quick-add field to take the keyboard (e.g. a paste with nothing focused).
     private(set) var quickAddFocusRequest = 0
-    /// Bumped to ask the header to start renaming the note (a brand-new list starts out that way).
-    private(set) var renameRequest = 0
-
-    func requestRename() { renameRequest += 1 }
 
     /// Holds a pasted image in the quick-add, replacing any already waiting, and focuses the field.
     func stageImage(_ data: Data) {
@@ -245,6 +355,9 @@ final class NoteController {
         Task { [db] in try? await db.insertTask(snapshot, reordering: orderedSnapshot) }
         return task.id
     }
+
+    @discardableResult
+    func addEmptyTask() -> UUID { insertEmptyTask(at: tasks.count, level: 0) }
 
     /// Toggles a task's checkbox. Completion cascades down its subtree and bubbles up to ancestors
     /// (see `TaskOutline.applyingToggle`); only the rows that actually changed are written, and
@@ -393,6 +506,24 @@ extension NoteController {
 
     // MARK: - Appearance
 
+    func setBackgroundOpacity(_ value: Double) {
+        let opacity = min(1, max(0.3, value))
+        guard note.backgroundOpacity != opacity else { return }
+        note.backgroundOpacity = opacity
+        pendingOpacity = opacity
+        opacityRevision += 1
+        let revision = opacityRevision
+        let previous = opacitySave
+        opacitySave = Task { [weak self, db, noteID] in
+            await previous?.value
+            do { try await db.updateNoteBackgroundOpacity(id: noteID, opacity: opacity) }
+            catch { NSLog("[Tic] note opacity save failed: \(error)") }
+            guard let self, self.opacityRevision == revision else { return }
+            self.pendingOpacity = nil
+            if let latest = try? await db.note(id: noteID), self.opacityRevision == revision { self.applyObservedNote(latest) }
+        }
+    }
+
     func setColor(_ color: NoteColor) {
         guard color != note.color else { return }
         note.color = color
@@ -417,32 +548,37 @@ extension NoteController {
 
     func toggleFloatOnTop() {
         note.floatOnTop.toggle()
-        let id = noteID
         let floatOnTop = note.floatOnTop
         let showOnAllSpaces = note.showOnAllSpaces
-        let isCollapsed = note.isCollapsed
         onApplyBehavior?(floatOnTop, showOnAllSpaces)   // update the live window at once
-        Task { [db] in
-            try? await db.updateNoteFlags(
-                id: id, floatOnTop: floatOnTop,
-                showOnAllSpaces: showOnAllSpaces, isCollapsed: isCollapsed
-            )
-        }
+        saveBehavior()
     }
 
     /// Rolls the note up to just its title bar (or back down), like Stickies.
     func toggleCollapsed() {
         note.isCollapsed.toggle()
-        let id = noteID
         let collapsed = note.isCollapsed
-        let floatOnTop = note.floatOnTop
-        let showOnAllSpaces = note.showOnAllSpaces
         onSetCollapsed?(collapsed)   // resize the live window at once
-        Task { [db] in
-            try? await db.updateNoteFlags(
-                id: id, floatOnTop: floatOnTop,
-                showOnAllSpaces: showOnAllSpaces, isCollapsed: collapsed
-            )
+        saveBehavior()
+    }
+
+    private func saveBehavior() {
+        let pending = (floating: note.floatOnTop, allSpaces: note.showOnAllSpaces, collapsed: note.isCollapsed)
+        pendingBehavior = pending
+        behaviorRevision += 1
+        let revision = behaviorRevision
+        let previous = behaviorSave
+        behaviorSave = Task { [weak self, db, noteID] in
+            await previous?.value
+            do {
+                try await db.updateNoteFlags(id: noteID, floatOnTop: pending.floating,
+                                             showOnAllSpaces: pending.allSpaces, isCollapsed: pending.collapsed)
+            } catch { NSLog("[Tic] note behavior save failed: \(error)") }
+            guard let self, self.behaviorRevision == revision else { return }
+            self.pendingBehavior = nil
+            if let latest = try? await db.note(id: noteID), self.behaviorRevision == revision {
+                self.applyObservedNote(latest)
+            }
         }
     }
 
@@ -501,6 +637,10 @@ extension NoteController {
 
     // MARK: - Lifecycle
 
+    func requestCloseConfirmation() {
+        closeConfirmationRequest += 1
+    }
+
     /// Hides this note (closes its panel). The note stays in the DB and reopens next launch.
     func requestClose() {
         onClose?()
@@ -509,28 +649,5 @@ extension NoteController {
     /// Creates a new, separate note.
     func requestNewNote() {
         onNewNote?()
-    }
-}
-
-extension NoteController {
-    /// New crops, plus a fresh thumbnail for any image whose content changed under the same task — a
-    /// replacement made on another Mac, where the crop may well be the same. The old thumbnail stays up
-    /// until the new one is decoded.
-    fileprivate func applyObservedImages(_ images: [UUID: TaskImageState]) {
-        let replaced = images.compactMap { id, image -> UUID? in
-            guard let hash = image.hash, let known = imageHashes[id], known != hash else { return nil }
-            return id
-        }
-        imageHashes = images.compactMapValues(\.hash)
-        imageCrops = images.mapValues(\.crop)
-        syncThumbnails()
-        for id in replaced where !loadingThumbnails.contains(id) { loadThumbnail(id) }
-    }
-
-    /// Switches sync with the user's other Macs on or off for this list (⋯ › Sync).
-    func toggleSynced() {
-        note.isSynced.toggle()
-        let id = noteID, on = note.isSynced
-        Task { [db] in try? await db.updateNoteSynced(id: id, isSynced: on) }
     }
 }

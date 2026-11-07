@@ -7,10 +7,22 @@ import SwiftUI
 /// from yanking the whole app forward — it behaves like a desktop sticky.
 final class NotePanel: NSPanel {
     let noteID: UUID
-
-    private static let noteStyle: NSWindow.StyleMask = [
-        .titled, .closable, .resizable, .fullSizeContentView, .nonactivatingPanel,
-    ]
+    var onHeaderDragEnded: (() -> Void)?
+    var onCompactResizeEnded: (() -> Void)?
+    var onShortcut: ((NoteShortcutAction) -> Void)?
+    var onCloseConfirmation: (() -> Void)?
+    var onSelectionClick: ((NSEvent.ModifierFlags) -> Void)?
+    var shouldSelectWithShift: (() -> Bool)?
+    var onOrdinaryClick: (() -> Void)?
+    var onSelectionContextMenu: ((NSEvent) -> Bool)?
+    var shouldPreserveSelectionForDrag: (() -> Bool)?
+    var onGroupDrag: ((NSEvent) -> Bool)?
+    private var selectionClickInProgress = false
+    var isRolling = false
+    var restoringPlacement = false
+    static let expandedStyle: NSWindow.StyleMask = [.titled, .closable, .resizable, .fullSizeContentView, .nonactivatingPanel]
+    // Compact notes use our edge tracking; AppKit's resizable style imposes a much taller minimum.
+    static let collapsedStyle: NSWindow.StyleMask = [.borderless, .nonactivatingPanel]
 
     init(note: Note, content: AnyView) {
         self.noteID = note.id
@@ -18,7 +30,7 @@ final class NotePanel: NSPanel {
         let rect = NSRect(x: note.frameX, y: note.frameY, width: note.frameW, height: note.frameH)
         super.init(
             contentRect: rect,
-            styleMask: Self.noteStyle,
+            styleMask: Self.expandedStyle,
             backing: .buffered,
             defer: false
         )
@@ -34,31 +46,19 @@ final class NotePanel: NSPanel {
         hasShadow = true
         isReleasedWhenClosed = false         // the window manager owns the lifetime
         animationBehavior = .utilityWindow
+        minSize = NSSize(width: 200, height: 160)
 
-        hideWindowButtons()
+        // Hide the traffic-light buttons; notes get their own controls in the header.
+        standardWindowButton(.closeButton)?.isHidden = true
+        standardWindowButton(.miniaturizeButton)?.isHidden = true
+        standardWindowButton(.zoomButton)?.isHidden = true
 
         let hosting = NSHostingView(rootView: content)
+        hosting.sizingOptions = []
         hosting.autoresizingMask = [.width, .height]
         contentView = hosting
 
         apply(floatOnTop: note.floatOnTop, showOnAllSpaces: note.showOnAllSpaces)
-    }
-
-    /// Rolled up, the note drops the system frame and draws its own capsule (`NoteBackground`): macOS rounds
-    /// a titled window's corners at a fixed 16pt, too round for a thin bar — the system outline and corner
-    /// mask split away from the note's fill at both ends. It drops the system shadow too: a frameless
-    /// window's shadow traces the capsule with a dark rim, which reads as a border on a light desktop.
-    func setRolledUp(_ rolledUp: Bool) {
-        styleMask = rolledUp ? [.borderless, .resizable, .nonactivatingPanel] : Self.noteStyle
-        hasShadow = !rolledUp
-        hideWindowButtons()   // a titled frame comes back with fresh traffic lights
-    }
-
-    /// Hides the traffic-light buttons; notes get their own controls in the header.
-    private func hideWindowButtons() {
-        for button: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
-            standardWindowButton(button)?.isHidden = true
-        }
     }
 
     /// Applies the float-on-top and show-on-all-Spaces behaviours to the live window.
@@ -72,25 +72,69 @@ final class NotePanel: NSPanel {
     /// Borderless/utility panels don't become key by default; we need it for text editing.
     override var canBecomeKey: Bool { true }
 
-    /// Called when a drag by the note's header has been let go. Set by `NoteWindowManager`.
-    var onDragEnded: (() -> Void)?
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        restoringPlacement ? frameRect : super.constrainFrameRect(frameRect, to: screen)
+    }
 
-    /// Moves the note with the pointer from `press` (the header's mouse-down, `WindowMoveArea`) until mouse-up.
-    /// Not the system's window drag: that returns at once, macOS settles or tiles a window let go at a screen
-    /// edge (fighting the bottom snap, issue 18), and its session swallowed a double-click's second click.
-    /// The top edge stays below the menu bar, as the system drag kept it.
-    override func performDrag(with press: NSEvent) {
-        let start = convertPoint(toScreen: press.locationInWindow)
-        let origin = frame.origin
-        while let event = nextEvent(matching: [.leftMouseDragged, .leftMouseUp]), event.type == .leftMouseDragged {
-            let pointer = NSEvent.mouseLocation
-            var next = NSPoint(x: origin.x + pointer.x - start.x, y: origin.y + pointer.y - start.y)
-            if let screen = NSScreen.screens.first(where: { $0.frame.contains(pointer) }) {
-                next.y = min(next.y, screen.visibleFrame.maxY - frame.height)
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown {
+            let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+            if (modifiers == .command || (modifiers.contains(.shift) && !modifiers.contains(.option)
+                && !modifiers.contains(.control) && shouldSelectWithShift?() == true)), let onSelectionClick {
+                selectionClickInProgress = true
+                onSelectionClick(modifiers)
+                return
             }
-            setFrameOrigin(next)
+            if modifiers.isEmpty {
+                let point = contentView?.convert(event.locationInWindow, from: nil) ?? .zero
+                var hit = contentView?.hitTest(point)
+                var onMoveArea = false
+                while let view = hit {
+                    if view is WindowMoveArea.MoveView { onMoveArea = true; break }
+                    hit = view.superview
+                }
+                // SwiftUI can return its hosting view instead of the represented move view.
+                // The expanded handle occupies the top 14 points; a compact note is all handle.
+                let compact = !styleMask.contains(.titled)
+                if compact || event.locationInWindow.y >= contentLayoutRect.maxY - 14 {
+                    onMoveArea = true
+                }
+                let groupSelected = shouldPreserveSelectionForDrag?() == true
+                if onMoveArea && groupSelected {
+                    let rect = contentView?.bounds ?? .zero
+                    let vertical = min(6, max(2, rect.height * 0.32))
+                    let horizontal = min(10, rect.width / 4)
+                    let compactEdge = compact && (point.x <= horizontal || point.x >= rect.width - horizontal
+                        || point.y <= vertical || point.y >= rect.height - vertical)
+                    if event.clickCount == 1 && !compactEdge && onGroupDrag?(event) == true { return }
+                } else { onOrdinaryClick?() }
+            }
         }
-        onDragEnded?()
+        if selectionClickInProgress && (event.type == .leftMouseUp || event.type == .leftMouseDragged) {
+            if event.type == .leftMouseUp { selectionClickInProgress = false }
+            return
+        }
+        if event.type == .rightMouseDown, onSelectionContextMenu?(event) == true { return }
+        if event.type == .leftMouseDown || event.type == .rightMouseDown {
+            // A nonactivating panel can receive a click while it is still behind another app.
+            // Raise only this note and keep the event intact for editing, dragging and controls.
+            if childWindows?.contains(where: { $0 is NoteClosePanel && $0.isVisible }) != true {
+                orderFrontRegardless()
+            }
+        }
+        super.sendEvent(event)
+    }
+
+    override func performClose(_ sender: Any?) {
+        onCloseConfirmation?()
+    }
+
+    /// Escape may dismiss an editor popover or composition, but must not close the note.
+    override func cancelOperation(_ sender: Any?) {}
+
+    override func animationResizeTime(_ newFrame: NSRect) -> TimeInterval {
+        let duration = super.animationResizeTime(newFrame)
+        return isRolling ? duration * 0.5 : duration
     }
 
     // MARK: - Paste
@@ -108,4 +152,11 @@ final class NotePanel: NSPanel {
         if item.action == #selector(paste(_:)) { return NSPasteboard.general.hasPastableImage }
         return super.validateUserInterfaceItem(item)
     }
+}
+
+/// A separate confirmation window needs its own Escape handling; it is not a note panel.
+final class NoteClosePanel: NSPanel {
+    var onCancel: (() -> Void)?
+
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
 }

@@ -1,0 +1,10 @@
+"关闭这个便签？" = "Close this note?";
+"隐藏后可在最近记录中重新打开；删除会永久移除便签和任务。" = "Hidden notes can be reopened from Recent. Deleting permanently removes the note and its tasks.";
+"隐藏" = "Hide";
+"删除" = "Delete";
+"关闭后可以在便签列表中重新打开，内容和任务会保留。" = "You can reopen it from the notes list. Its content and tasks will be kept.";
+"关闭便签" = "Close note";
+"取消" = "Cancel";
+"剪贴板" = "Clipboard";
+"剪贴板便签" = "Clipboard note";
+"删除剪贴板记录" = "Delete clipboard entry";

@@ -29,23 +29,21 @@ jobs:
         env:
           OUTPUT: RELEASE_NOTES.md
 
-      - name: Package Tic.app
-        run: VERSION="${GITHUB_REF_NAME#v}" ./scripts/package.sh
+      - name: Package Tico.app
+        run: VERSION="${GITHUB_REF_NAME#v}" ./scripts/package.sh --stable
 
-      # A stable name, so releases/latest/download/Tic.zip always resolves (install.sh, the in-app
-      # updater), plus a checksum both of them verify.
       - name: Zip the app
         run: |
-          ditto -c -k --keepParent dist/Tic.app dist/Tic.zip
-          (cd dist && shasum -a 256 Tic.zip > Tic.zip.sha256)
+          ditto -c -k --keepParent dist/stable/Tico.app dist/Tico.zip
+          (cd dist && shasum -a 256 Tico.zip > Tico.zip.sha256)
 
       - name: Build DMG
         run: |
           STAGING="$(mktemp -d)"
-          cp -R dist/Tic.app "$STAGING/Tic.app"
+          cp -R dist/stable/Tico.app "$STAGING/Tico.app"
           ln -s /Applications "$STAGING/Applications"   # drag-to-install layout
-          hdiutil create -volname "Tic" -srcfolder "$STAGING" -ov -format UDZO \
-            "dist/Tic-${GITHUB_REF_NAME}.dmg"
+          hdiutil create -volname "Tico" -srcfolder "$STAGING" -ov -format UDZO \
+            "dist/Tico-${GITHUB_REF_NAME}.dmg"
 
       - name: Ensure release notes are non-empty
         run: '[ -s RELEASE_NOTES.md ] || echo "Release ${GITHUB_REF_NAME}" > RELEASE_NOTES.md'
@@ -53,12 +51,12 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          name: Tic ${{ github.ref_name }}
+          name: Tico ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md
           files: |
-            dist/Tic-${{ github.ref_name }}.dmg
-            dist/Tic.zip
-            dist/Tic.zip.sha256
+            dist/Tico-${{ github.ref_name }}.dmg
+            dist/Tico.zip
+            dist/Tico.zip.sha256
 
   changelog:
     name: Update CHANGELOG.md
@@ -86,13 +84,3 @@ jobs:
             git commit -m "docs(changelog): update for ${GITHUB_REF_NAME} [skip ci]"
             git push origin main
           fi
-
-      # The site's "What's new" reads CHANGELOG.md at build time, and the commit above carries
-      # [skip ci], so ask Cloudflare Pages for a fresh build. Set the CF_DEPLOY_HOOK secret to the
-      # deploy hook URL (Pages project → Settings → Builds → Deploy hooks).
-      - name: Redeploy the site
-        env:
-          CF_DEPLOY_HOOK: ${{ secrets.CF_DEPLOY_HOOK }}
-        run: |
-          if [ -z "$CF_DEPLOY_HOOK" ]; then echo "CF_DEPLOY_HOOK secret not set; skipping"; exit 0; fi
-          curl -fsS -X POST "$CF_DEPLOY_HOOK" >/dev/null && echo "Cloudflare deploy triggered"

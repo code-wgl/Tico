@@ -24,7 +24,7 @@ struct ShortcutHint: View {
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
                         .strokeBorder(theme.accent.opacity(0.22), lineWidth: 0.5)
                 )
-            Text(label)
+            Text(LocalizedStringKey(label))
                 .font(.system(size: 10.5))
                 .foregroundStyle(theme.secondary.opacity(0.9))
         }
