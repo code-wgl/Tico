@@ -35,14 +35,6 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: Generate release notes
-        uses: orhun/git-cliff-action@v4
-        with:
-          config: cliff.toml
-          args: --latest --strip header
-        env:
-          OUTPUT: RELEASE_NOTES.md
-
       - name: Package Tico.app
         run: |
           set -euo pipefail
@@ -69,44 +61,14 @@ jobs:
             "dist/Tico-${GITHUB_REF_NAME}.dmg"
           hdiutil verify "dist/Tico-${GITHUB_REF_NAME}.dmg"
 
-      - name: Ensure release notes are non-empty
-        run: '[ -s RELEASE_NOTES.md ] || echo "Release ${GITHUB_REF_NAME}" > RELEASE_NOTES.md'
-
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           name: Tico ${{ github.ref_name }}
-          body_path: RELEASE_NOTES.md
+          generate_release_notes: true
+          body: |
+            Universal macOS build for Apple Silicon and Intel. This build is ad-hoc signed and is not notarized by Apple. See the README for installation and data compatibility details.
           files: |
             dist/Tico-${{ github.ref_name }}.dmg
             dist/Tico.zip
             dist/Tico.zip.sha256
-
-  changelog:
-    name: Update CHANGELOG.md
-    needs: release
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Regenerate CHANGELOG.md
-        uses: orhun/git-cliff-action@v4
-        with:
-          config: cliff.toml
-        env:
-          OUTPUT: CHANGELOG.md
-
-      - name: Commit CHANGELOG.md
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add CHANGELOG.md
-          if ! git diff --staged --quiet; then
-            git commit -m "docs(changelog): update for ${GITHUB_REF_NAME} [skip ci]"
-            git push origin main
-          fi
