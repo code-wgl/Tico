@@ -56,7 +56,8 @@ if [ "$bundles_found" -eq 0 ]; then
     exit 1
 fi
 
-if [ ! -f "$APP/Contents/Resources/Tic_Tic.bundle/MenuBarIcon.png" ]; then
+if [ ! -f "$APP/Contents/Resources/Tic_Tic.bundle/MenuBarIcon.png" ] && \
+   [ ! -f "$APP/Contents/Resources/Tic_Tic.bundle/Contents/Resources/MenuBarIcon.png" ]; then
     echo "error: missing packaged menu bar icon bundle" >&2
     exit 1
 fi

@@ -43,6 +43,12 @@ swift test
 
 项目使用 Swift Package Manager 管理依赖，首次构建需要联网下载依赖。打包产物位于 `dist/development/` 或 `dist/stable/`；使用 `--open` 可在打包后打开应用。也可使用 `open Package.swift` 在 Xcode 中打开项目。
 
+## 自动构建与发行 CI and releases
+
+推送到 `main`、提交 pull request 或手动运行 CI 时，GitHub Actions 会构建支持 Apple Silicon 和 Intel 的通用应用，并在构建成功后将 ZIP、DMG 和 SHA-256 校验文件保存为该次运行的 **Artifacts**（保留 14 天）。这些是持续集成产物，完整测试结果请查看同一次运行中的 Test 和 Lint 任务。
+
+推送形如 `v1.0.11` 的版本标签会启动正式发行流程：先运行测试，通过后构建、校验并发布到 GitHub Releases。发布包目前采用 ad-hoc 签名，未经过 Apple 公证。
+
 > 兼容已有用户数据：正式版保留原 Tic 的应用标识和 `~/Library/Application Support/Tic/` 数据目录；开发版使用独立目录。备份和迁移时请注意保护自己的便签数据。
 
 ## 使用 Usage
