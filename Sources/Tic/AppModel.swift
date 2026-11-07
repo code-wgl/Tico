@@ -276,6 +276,10 @@ final class AppModel {
         Task { await windows.deleteNote(note) }
     }
 
+}
+
+// Window presentation and application preferences.
+extension AppModel {
     /// Opens the searchable "Lists" palette — a floating, centered panel that always comes to the
     /// front when called. Reuses a single instance. (A real window, so search/delete re-render
     /// reliably, unlike the menu-bar popover.)

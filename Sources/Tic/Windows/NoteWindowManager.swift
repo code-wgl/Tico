@@ -152,24 +152,7 @@ final class NoteWindowManager: NSObject, NSWindowDelegate {
         }
         panel.onHeaderDragEnded = { [weak self, weak panel] in
             guard let self, let panel else { return }
-            if self.controllers[panel.noteID]?.note.isCollapsed != true {
-                if let previous = self.collapsedRestoreFrames[panel.noteID] {
-                    let expected = self.controllers[panel.noteID]?.isMaximized == true
-                        ? (panel.screen ?? NSScreen.main)?.visibleFrame ?? previous.expanded
-                        : previous.expanded
-                    if !Self.framesMatch(panel.frame, expected) {
-                        self.collapsedRestoreFrames[panel.noteID] = nil
-                        self.storeCompactAnchor(nil, for: panel.noteID)
-                    }
-                }
-                self.scheduleFrameSave(for: panel, userAction: true)
-                return
-            }
-            if let screen = panel.screen {
-                let target = Self.snappedToBottom(panel.frame, visibleFrame: screen.visibleFrame)
-                if target != panel.frame { panel.setFrame(target, display: true, animate: true) }
-            }
-            self.scheduleFrameSave(for: panel, userAction: true)
+            self.handleHeaderDragEnded(panel)
         }
         panel.onCompactResizeEnded = { [weak self, weak panel] in
             guard let self, let panel else { return }
@@ -199,6 +182,27 @@ final class NoteWindowManager: NSObject, NSWindowDelegate {
         panel.restoringPlacement = false
         panel.delegate = self   // only now: the placement and roll-up above aren't user moves to persist
         return panel
+    }
+
+    private func handleHeaderDragEnded(_ panel: NotePanel) {
+        if controllers[panel.noteID]?.note.isCollapsed != true {
+            if let previous = collapsedRestoreFrames[panel.noteID] {
+                let expected = controllers[panel.noteID]?.isMaximized == true
+                    ? (panel.screen ?? NSScreen.main)?.visibleFrame ?? previous.expanded
+                    : previous.expanded
+                if !Self.framesMatch(panel.frame, expected) {
+                    collapsedRestoreFrames[panel.noteID] = nil
+                    storeCompactAnchor(nil, for: panel.noteID)
+                }
+            }
+            scheduleFrameSave(for: panel, userAction: true)
+            return
+        }
+        if let screen = panel.screen {
+            let target = Self.snappedToBottom(panel.frame, visibleFrame: screen.visibleFrame)
+            if target != panel.frame { panel.setFrame(target, display: true, animate: true) }
+        }
+        scheduleFrameSave(for: panel, userAction: true)
     }
 
     private func presentCloseConfirmation(for controller: NoteController, parent: NotePanel, hiddenCount: Int, onDismiss: @escaping () -> Void) {
@@ -306,6 +310,11 @@ final class NoteWindowManager: NSObject, NSWindowDelegate {
         }
     }
 
+}
+
+// MARK: - Selection and arrangement
+
+extension NoteWindowManager {
     /// Brings every open note to the front (menu-bar "Show All").
     func showAll() {
         for panel in panels.values { panel.orderFront(nil) }
@@ -547,6 +556,11 @@ final class NoteWindowManager: NSObject, NSWindowDelegate {
         return true
     }
 
+}
+
+// MARK: - Window geometry and placement
+
+extension NoteWindowManager {
     private func toggleMaximize(_ panel: NotePanel) {
         guard let controller = controllers[panel.noteID], let screen = panel.screen ?? NSScreen.main else { return }
         let target: CGRect
@@ -803,7 +817,11 @@ final class NoteWindowManager: NSObject, NSWindowDelegate {
         }
     }
 
-    // MARK: - Image window
+}
+
+// MARK: - Image window and external actions
+
+extension NoteWindowManager {
 
     /// Shows a task's image in the image window, creating the window on first use. It takes the note's
     /// window level, so it opens above a float-on-top note, and activates the app so it comes up in front
@@ -913,7 +931,11 @@ final class NoteWindowManager: NSObject, NSWindowDelegate {
         }
     }
 
-    // MARK: - NSWindowDelegate
+}
+
+// MARK: - NSWindowDelegate
+
+extension NoteWindowManager {
 
     func windowDidMove(_ notification: Notification) { scheduleFrameSave(notification) }
     func windowDidResize(_ notification: Notification) { scheduleFrameSave(notification) }

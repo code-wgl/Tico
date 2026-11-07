@@ -59,6 +59,10 @@ struct MCPTools: Sendable {
         }
     }
 
+}
+
+// Implementations and validation helpers for the public tool dispatcher.
+extension MCPTools {
     // MARK: - Note tools
 
     private func listNotes() async throws -> Value {

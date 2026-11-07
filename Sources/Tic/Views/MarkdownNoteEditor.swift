@@ -66,7 +66,7 @@ private func orderedListMarkers(in source: NSString) -> [OrderedListMarker] {
         if fence.consume(line) { stack.removeAll(); group += 1; return }
         guard !fence.isInside else { return }
         let text = line as NSString
-        guard let match = MarkdownEditingTextView.listLineRegex.firstMatch(in: line, range: NSRange(location: 0, length: text.length)) else {
+        guard let match = MarkdownEditingTextView.listLineRegex?.firstMatch(in: line, range: NSRange(location: 0, length: text.length)) else {
             stack.removeAll(); group += 1; return
         }
         let indent = match.range(at: 1).length
@@ -425,7 +425,7 @@ struct MarkdownNoteEditor: NSViewRepresentable {
                         reminderRanges.append(NSRange(location: range.location + match.range.location, length: match.range.length))
                     }
                 }
-                if let match = taskRegex.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) {
+                if let match = taskRegex?.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) {
                     let indent = match.range(at: 1).length
                     let marker = NSRange(location: range.location + indent, length: match.range.length - indent)
                     let checked = (line as NSString).substring(with: match.range(at: 2)) != " "
@@ -471,7 +471,7 @@ struct MarkdownNoteEditor: NSViewRepresentable {
                     paragraph.paragraphSpacing = 2
                     storage.addAttribute(.paragraphStyle, value: paragraph,
                                          range: source.paragraphRange(for: range))
-                } else if let match = MarkdownEditingTextView.listLineRegex.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) {
+                } else if let match = MarkdownEditingTextView.listLineRegex?.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) {
                     let indent = match.range(at: 1).length
                     let marker = NSRange(location: range.location + indent, length: match.range.length - indent)
                     let value = (line as NSString).substring(with: match.range(at: 2))
@@ -874,8 +874,8 @@ private final class InlineNoteAttachment: NSTextAttachment {
 }
 
 final class MarkdownEditingTextView: NSTextView {
-    static let taskLineRegex = try! NSRegularExpression(pattern: #"^([ \t]*)[-*+] \[([ xX])\](?:[ \t]+|$)"#)
-    static let listLineRegex = try! NSRegularExpression(pattern: #"^([ \t]*)([-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)"#)
+    static let taskLineRegex = try? NSRegularExpression(pattern: #"^([ \t]*)[-*+] \[([ xX])\](?:[ \t]+|$)"#)
+    static let listLineRegex = try? NSRegularExpression(pattern: #"^([ \t]*)([-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)"#)
     var structuralRangeSource: String?
     // A collapsed or closed note destroys its editor. Keep its undo stack with that editor,
     // rather than leaving text-system actions on a longer-lived window undo manager.
@@ -924,7 +924,13 @@ final class MarkdownEditingTextView: NSTextView {
     private var colorPanelSelection: StylePanelSelection?
     private var fontPanelSelection: StylePanelSelection?
     func isTaskAwaitingHide(at location: Int) -> Bool { recentlyCompleted.contains(location) }
-    private var pendingTaskPointer: (range: NSRange, start: NSPoint, current: NSPoint, moved: Bool)?
+    private struct PendingTaskPointer {
+        let range: NSRange
+        let start: NSPoint
+        var current: NSPoint
+        var moved: Bool
+    }
+    private var pendingTaskPointer: PendingTaskPointer?
     private var reminderClickInProgress = false
 
     /// Selection changes can arrive after TextKit edits but before textDidChange restyles.
@@ -939,7 +945,7 @@ final class MarkdownEditingTextView: NSTextView {
         source.enumerateSubstrings(in: NSRange(location: 0, length: source.length), options: .byLines) { line, range, _, _ in
             guard let line else { return }
             if fence.consume(line) { return }
-            guard !fence.isInside, let match = Self.taskLineRegex.firstMatch(in: line,
+            guard !fence.isInside, let match = Self.taskLineRegex?.firstMatch(in: line,
                 range: NSRange(location: 0, length: (line as NSString).length)) else { return }
             let indent = match.range(at: 1).length
             let checked = (line as NSString).substring(with: match.range(at: 2)) != " "
@@ -1171,6 +1177,7 @@ final class MarkdownEditingTextView: NSTextView {
 
     private func bulletsForDrawing() -> [NSRange] {
         guard hasMarkedText() else { return bulletMarkers }
+        guard let taskRegex = Self.taskLineRegex, let listRegex = Self.listLineRegex else { return [] }
         let source = string as NSString
         var result: [NSRange] = []
         var fence = MarkdownFenceScanner()
@@ -1178,8 +1185,8 @@ final class MarkdownEditingTextView: NSTextView {
             guard let line else { return }
             if fence.consume(line) { return }
             let lineRange = NSRange(location: 0, length: (line as NSString).length)
-            guard !fence.isInside, Self.taskLineRegex.firstMatch(in: line, range: lineRange) == nil,
-                  let match = Self.listLineRegex.firstMatch(in: line, range: lineRange),
+            guard !fence.isInside, taskRegex.firstMatch(in: line, range: lineRange) == nil,
+                  let match = listRegex.firstMatch(in: line, range: lineRange),
                   ["-", "+", "*"].contains((line as NSString).substring(with: match.range(at: 2))) else { return }
             let indent = match.range(at: 1).length
             result.append(NSRange(location: range.location + indent, length: match.range.length - indent))
@@ -2199,7 +2206,7 @@ final class MarkdownEditingTextView: NSTextView {
         guard let prefix = try? NSRegularExpression(
             pattern: #"^([ \t]*)(?:(?:[-*+] \[[ xX]\]|[-*+]|[0-9]+[.)]|#{1,6})[ \t]+)?"#
         ) else { return }
-        let task = Self.taskLineRegex
+        guard let task = Self.taskLineRegex else { return }
         var replacements: [(NSRange, String)] = []
         var ordinal: [Int: Int] = [:]
         var fence = MarkdownFenceScanner()
@@ -2510,8 +2517,9 @@ final class MarkdownEditingTextView: NSTextView {
         guard !fence.isInside else { return false }
         let line = source.substring(with: lineRange) as NSString
         let search = NSRange(location: 0, length: line.length)
-        guard Self.taskLineRegex.firstMatch(in: line as String, range: search) == nil,
-              let match = Self.listLineRegex.firstMatch(in: line as String, range: search),
+        guard let taskRegex = Self.taskLineRegex, let listRegex = Self.listLineRegex,
+              taskRegex.firstMatch(in: line as String, range: search) == nil,
+              let match = listRegex.firstMatch(in: line as String, range: search),
               selection.location >= lineRange.location + NSMaxRange(match.range) else { return false }
         if (event.keyCode == 36 || event.keyCode == 76), modifiers.isEmpty {
             breakUndoCoalescing()
@@ -2773,7 +2781,8 @@ final class MarkdownEditingTextView: NSTextView {
             )) && taskMarkerRect(marker.range)?.insetBy(dx: -4, dy: -4).contains(point) == true
         }) {
             window?.makeFirstResponder(self)
-            pendingTaskPointer = (marker.range, event.locationInWindow, event.locationInWindow, false)
+            pendingTaskPointer = PendingTaskPointer(range: marker.range, start: event.locationInWindow,
+                                                    current: event.locationInWindow, moved: false)
             return
         }
         // The indentation before a task is a gutter, not editable whitespace. Ignore clicks
