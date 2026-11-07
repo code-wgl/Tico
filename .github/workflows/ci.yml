@@ -38,6 +38,12 @@ jobs:
           codesign --verify --deep --strict "$RUNNER_TEMP/tico-package-check/Tico.app"
           lipo -verify_arch arm64 x86_64 "$RUNNER_TEMP/tico-package-check/Tico.app/Contents/MacOS/Tic"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleName' "$RUNNER_TEMP/tico-package-check/Tico.app/Contents/Info.plist")" = Tico
+          mkdir -p "$RUNNER_TEMP/tico-dmg"
+          ditto dist/stable/Tico.app "$RUNNER_TEMP/tico-dmg/Tico.app"
+          ln -s /Applications "$RUNNER_TEMP/tico-dmg/Applications"
+          hdiutil create -volname Tico -srcfolder "$RUNNER_TEMP/tico-dmg" -format UDZO dist/Tico.dmg
+          hdiutil verify dist/Tico.dmg
+          (cd dist && shasum -a 256 Tico.dmg > Tico.dmg.sha256 && shasum -a 256 -c Tico.dmg.sha256)
       - name: Upload macOS package
         uses: actions/upload-artifact@v4
         with:
@@ -45,6 +51,8 @@ jobs:
           path: |
             dist/Tico.zip
             dist/Tico.zip.sha256
+            dist/Tico.dmg
+            dist/Tico.dmg.sha256
           if-no-files-found: error
           retention-days: 14
 

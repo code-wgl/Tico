@@ -22,6 +22,24 @@ struct ReorderDragTests {
         let drag: ReorderDrag
         var top: CGFloat { panel.contentView!.bounds.height }
         var order: [String] { controller.tasks.map(\.text) }
+
+        /// Row preferences use SwiftUI's top-left global coordinates; NSEvents use window coordinates.
+        func rowPoint(_ index: Int) throws -> NSPoint {
+            #if DEBUG
+            let task = try #require(controller.tasks.indices.contains(index) ? controller.tasks[index] : nil)
+            let frame = try #require(NoteView.testRowFrames[task.id], "task row has not been laid out")
+            return NSPoint(x: frame.minX + min(60, frame.width / 3), y: top - frame.midY)
+            #else
+            throw NSError(domain: "ReorderDragTests", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Run the UI tests in debug configuration"])
+            #endif
+        }
+
+        func twoRowDistance() throws -> CGFloat {
+            let first = try rowPoint(0)
+            let third = try rowPoint(2)
+            return first.y - third.y
+        }
     }
 
     private func makeHarness(_ tasks: [(String, Int)]) async throws -> Harness {
@@ -34,7 +52,15 @@ struct ReorderDragTests {
         let drag = ReorderDrag()
         let panel = NotePanel(note: note, content: AnyView(NoteView(controller: controller, drag: drag)))
         panel.makeKeyAndOrderFront(nil)
+        #if DEBUG
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline && (controller.tasks.count != tasks.count ||
+            !controller.tasks.allSatisfy({ NoteView.testRowFrames[$0.id] != nil })) {
+            pump(0.02)
+        }
+        #else
         pump(0.3)
+        #endif
         return Harness(panel: panel, controller: controller, drag: drag)
     }
 
@@ -67,7 +93,7 @@ struct ReorderDragTests {
 
     /// Presses on the first row and nudges it so the drag starts; returns where the pointer now is.
     private func pickUpFirstRow(_ h: Harness) throws -> NSPoint {
-        let start = NSPoint(x: 60, y: h.top - 80)
+        let start = try h.rowPoint(0)
         // Never press AppKit text or the header's move area: they run tracking loops that would hang.
         // (SwiftUI's own container class here differs by macOS version, so it can't be matched by name.)
         let hit = try #require(h.panel.contentView?.hitTest(start))
@@ -83,9 +109,10 @@ struct ReorderDragTests {
     func dropsAtPlaceholder() async throws {
         let h = try await makeHarness()
         defer { h.panel.orderOut(nil) }
+        let distance = try h.twoRowDistance()
         let at = try pickUpFirstRow(h)
-        drag(h, from: at, to: NSPoint(x: at.x, y: at.y - 46))
-        send(.leftMouseUp, NSPoint(x: at.x, y: at.y - 46), to: h)
+        drag(h, from: at, to: NSPoint(x: at.x, y: at.y - distance))
+        send(.leftMouseUp, NSPoint(x: at.x, y: at.y - distance), to: h)
         pump(0.3)
         #expect(h.drag.taskID == nil)
         #expect(h.order == ["B", "C", "A", "D", "E", "F"])
@@ -95,12 +122,13 @@ struct ReorderDragTests {
     func survivesPause() async throws {
         let h = try await makeHarness()
         defer { h.panel.orderOut(nil) }
+        let distance = try h.twoRowDistance()
         let at = try pickUpFirstRow(h)
         pump(0.6)   // well past the pickup animation, which used to remove the pressed view
         let before = h.drag.location
-        drag(h, from: at, to: NSPoint(x: at.x, y: at.y - 46))
+        drag(h, from: at, to: NSPoint(x: at.x, y: at.y - distance))
         #expect(h.drag.location != before, "the drag stopped receiving events")
-        send(.leftMouseUp, NSPoint(x: at.x, y: at.y - 46), to: h)
+        send(.leftMouseUp, NSPoint(x: at.x, y: at.y - distance), to: h)
         pump(0.3)
         #expect(h.drag.taskID == nil)
         #expect(h.order.firstIndex(of: "A") == 2)
@@ -110,6 +138,7 @@ struct ReorderDragTests {
     func leavesAndReturns(_ side: String) async throws {
         let h = try await makeHarness()
         defer { h.panel.orderOut(nil) }
+        let distance = try h.twoRowDistance()
         let at = try pickUpFirstRow(h)
         let away = switch side {
         case "right": NSPoint(x: 420, y: at.y - 30)
@@ -119,7 +148,7 @@ struct ReorderDragTests {
         }
         drag(h, from: at, to: away)
         let outside = h.drag.location
-        let back = NSPoint(x: at.x, y: at.y - 46)
+        let back = NSPoint(x: at.x, y: at.y - distance)
         drag(h, from: away, to: back)
         #expect(h.drag.location != outside, "the drag stopped receiving events outside the note")
         send(.leftMouseUp, back, to: h)
@@ -145,10 +174,11 @@ struct ReorderDragTests {
     func carriesSubtree() async throws {
         let h = try await makeHarness([("A", 0), ("A1", 1), ("B", 0), ("C", 0), ("D", 0)])
         defer { h.panel.orderOut(nil) }
+        let distance = try h.twoRowDistance()
         let at = try pickUpFirstRow(h)
         #expect(h.drag.block.map(\.text) == ["A", "A1"])
-        drag(h, from: at, to: NSPoint(x: at.x, y: at.y - 40))
-        send(.leftMouseUp, NSPoint(x: at.x, y: at.y - 40), to: h)
+        drag(h, from: at, to: NSPoint(x: at.x, y: at.y - distance))
+        send(.leftMouseUp, NSPoint(x: at.x, y: at.y - distance), to: h)
         pump(0.3)
         let index = try #require(h.order.firstIndex(of: "A"))
         #expect(index > 0)                       // it moved…

@@ -71,6 +71,8 @@ struct NoteView: View {
     #if DEBUG
     /// Times the task list has been rebuilt; tests use it to check a drag doesn't redo it every frame.
     static var taskListRenders = 0
+    /// Rendered task rows in the hosting view's global coordinate space, for UI tests.
+    static var testRowFrames: [UUID: CGRect] = [:]
     #endif
 
     /// `drag` is injectable so tests can watch a reorder drag's state.
@@ -313,7 +315,12 @@ struct NoteView: View {
                 .background(NoteScrollerInstaller(color: theme.secondary))
                 .coordinateSpace(.named(Self.listSpace))
                 .overlay(alignment: .topLeading) { dragOverlay(parentID: dropParent) }
-                .onPreferenceChange(RowFrame.Key.self) { rowFrames = $0 }
+                .onPreferenceChange(RowFrame.Key.self) { frames in
+                    rowFrames = frames
+                    #if DEBUG
+                    Self.testRowFrames = Dictionary(uniqueKeysWithValues: frames.map { ($0.id, $0.globalFrame) })
+                    #endif
+                }
             }
             .scrollContentBackground(.hidden)
             // A click on the empty space (anywhere not a row/field/button) ends editing — and a blank
@@ -424,10 +431,18 @@ struct NoteView: View {
             .padding(.vertical, 1)
             .background(
                 GeometryReader { geo in
+                    #if DEBUG
+                    Color.clear.preference(
+                        key: RowFrame.Key.self,
+                        value: [RowFrame(id: task.id, frame: geo.frame(in: .named(Self.listSpace)),
+                                         globalFrame: geo.frame(in: .global))]
+                    )
+                    #else
                     Color.clear.preference(
                         key: RowFrame.Key.self,
                         value: [RowFrame(id: task.id, frame: geo.frame(in: .named(Self.listSpace)))]
                     )
+                    #endif
                 }
             )
             // Reorder is paused while completed are auto-sorted to the bottom (it would fight the sort), and on a
@@ -628,6 +643,9 @@ extension NoteView {
 private struct RowFrame: Equatable {
     let id: UUID
     let frame: CGRect
+    #if DEBUG
+    let globalFrame: CGRect
+    #endif
 
     struct Key: PreferenceKey {
         static let defaultValue: [RowFrame] = []
