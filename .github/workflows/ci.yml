@@ -36,7 +36,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/tico-package-check"
           ditto -x -k dist/Tico.zip "$RUNNER_TEMP/tico-package-check"
           codesign --verify --deep --strict "$RUNNER_TEMP/tico-package-check/Tico.app"
-          lipo -verify_arch arm64 x86_64 "$RUNNER_TEMP/tico-package-check/Tico.app/Contents/MacOS/Tic"
+          lipo "$RUNNER_TEMP/tico-package-check/Tico.app/Contents/MacOS/Tic" -verify_arch arm64 x86_64
           cmp Sources/Tic/Resources/MenuBarIcon.png "$RUNNER_TEMP/tico-package-check/Tico.app/Contents/Resources/MenuBarIcon.png"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleName' "$RUNNER_TEMP/tico-package-check/Tico.app/Contents/Info.plist")" = Tico
           mkdir -p "$RUNNER_TEMP/tico-dmg"

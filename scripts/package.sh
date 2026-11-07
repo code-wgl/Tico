@@ -78,7 +78,7 @@ codesign --force --sign - "$APP"
 echo "▸ Verifying signature…"
 codesign --verify --strict "$APP"
 if [[ "${TICO_UNIVERSAL:-0}" == "1" ]]; then
-    lipo -verify_arch arm64 x86_64 "$APP/Contents/MacOS/Tic"
+    lipo "$APP/Contents/MacOS/Tic" -verify_arch arm64 x86_64
 fi
 
 echo "✓ Built $APP"
