@@ -57,6 +57,7 @@ jobs:
           ditto -x -k dist/Tico.zip "$RUNNER_TEMP/tico-release-check"
           codesign --verify --deep --strict "$RUNNER_TEMP/tico-release-check/Tico.app"
           lipo -verify_arch arm64 x86_64 "$RUNNER_TEMP/tico-release-check/Tico.app/Contents/MacOS/Tic"
+          cmp Sources/Tic/Resources/MenuBarIcon.png "$RUNNER_TEMP/tico-release-check/Tico.app/Contents/Resources/MenuBarIcon.png"
           test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$RUNNER_TEMP/tico-release-check/Tico.app/Contents/Info.plist")" = "${GITHUB_REF_NAME#v}"
 
       - name: Build DMG

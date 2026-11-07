@@ -38,6 +38,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$RELEASE_DIR/Tic" "$APP/Contents/MacOS/Tic"
 cp "Packaging/Info.plist"   "$APP/Contents/Info.plist"
 cp "Assets/AppIcon/Tic.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "Sources/Tic/Resources/MenuBarIcon.png" "$APP/Contents/Resources/MenuBarIcon.png"
 cp -R Packaging/Localizations/*.lproj "$APP/Contents/Resources/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
