@@ -4,9 +4,12 @@ import Testing
 
 @Suite("NoteColor")
 struct NoteColorTests {
-    @Test("provides the six themes")
+    @Test("provides the supported themes")
     func cases() {
-        #expect(NoteColor.allCases.count == 6)
+        #expect(Set(NoteColor.allCases.map(\.rawValue)) == Set([
+            "yellow", "pink", "blue", "green", "purple", "graphite",
+            "orange", "coral", "mint", "teal", "cream", "white"
+        ]))
     }
 
     @Test("solid surface resolves distinct, tuned inks per role")

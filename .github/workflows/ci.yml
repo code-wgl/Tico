@@ -6,6 +6,10 @@ on:
     paths-ignore: ['site/**']
   pull_request:
     paths-ignore: ['site/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -23,7 +27,26 @@ jobs:
       - name: Toolchain
         run: swift --version
       - name: Build and package
-        run: ./scripts/package.sh
+        run: TICO_UNIVERSAL=1 ./scripts/package.sh --stable
+      - name: Archive and verify package
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent dist/stable/Tico.app dist/Tico.zip
+          (cd dist && shasum -a 256 Tico.zip > Tico.zip.sha256 && shasum -a 256 -c Tico.zip.sha256)
+          mkdir -p "$RUNNER_TEMP/tico-package-check"
+          ditto -x -k dist/Tico.zip "$RUNNER_TEMP/tico-package-check"
+          codesign --verify --deep --strict "$RUNNER_TEMP/tico-package-check/Tico.app"
+          lipo -verify_arch arm64 x86_64 "$RUNNER_TEMP/tico-package-check/Tico.app/Contents/MacOS/Tic"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleName' "$RUNNER_TEMP/tico-package-check/Tico.app/Contents/Info.plist")" = Tico
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tico-macOS-${{ github.sha }}
+          path: |
+            dist/Tico.zip
+            dist/Tico.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
 
   test:
     name: Test

@@ -24,8 +24,12 @@ esac
 APP="$DIST/$APP_NAME.app"
 
 echo "▸ Building release…"
-swift build -c release
-RELEASE_DIR="$(swift build -c release --show-bin-path)"
+BUILD_ARGS=(-c release)
+if [[ "${TICO_UNIVERSAL:-0}" == "1" ]]; then
+    BUILD_ARGS+=(--arch arm64 --arch x86_64)
+fi
+swift build "${BUILD_ARGS[@]}"
+RELEASE_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
 
 echo "▸ Assembling $APP_NAME.app…"
 rm -rf "$APP"
@@ -71,6 +75,9 @@ codesign --force --sign - "$APP"
 
 echo "▸ Verifying signature…"
 codesign --verify --strict "$APP"
+if [[ "${TICO_UNIVERSAL:-0}" == "1" ]]; then
+    lipo -verify_arch arm64 x86_64 "$APP/Contents/MacOS/Tic"
+fi
 
 echo "✓ Built $APP"
 codesign -dv "$APP" 2>&1 | sed 's/^/    /' || true

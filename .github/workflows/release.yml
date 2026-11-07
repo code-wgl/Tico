@@ -6,11 +6,25 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  test:
+    name: Test before release
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Run tests
+        run: swift test
+
   release:
     name: Build & publish
+    needs: test
+    permissions:
+      contents: write
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
@@ -30,12 +44,20 @@ jobs:
           OUTPUT: RELEASE_NOTES.md
 
       - name: Package Tico.app
-        run: VERSION="${GITHUB_REF_NAME#v}" ./scripts/package.sh --stable
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected a release tag such as v1.0.11'; exit 1; }
+          TICO_UNIVERSAL=1 VERSION="${GITHUB_REF_NAME#v}" ./scripts/package.sh --stable
 
       - name: Zip the app
         run: |
           ditto -c -k --keepParent dist/stable/Tico.app dist/Tico.zip
-          (cd dist && shasum -a 256 Tico.zip > Tico.zip.sha256)
+          (cd dist && shasum -a 256 Tico.zip > Tico.zip.sha256 && shasum -a 256 -c Tico.zip.sha256)
+          mkdir -p "$RUNNER_TEMP/tico-release-check"
+          ditto -x -k dist/Tico.zip "$RUNNER_TEMP/tico-release-check"
+          codesign --verify --deep --strict "$RUNNER_TEMP/tico-release-check/Tico.app"
+          lipo -verify_arch arm64 x86_64 "$RUNNER_TEMP/tico-release-check/Tico.app/Contents/MacOS/Tic"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$RUNNER_TEMP/tico-release-check/Tico.app/Contents/Info.plist")" = "${GITHUB_REF_NAME#v}"
 
       - name: Build DMG
         run: |
@@ -61,6 +83,8 @@ jobs:
   changelog:
     name: Update CHANGELOG.md
     needs: release
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
