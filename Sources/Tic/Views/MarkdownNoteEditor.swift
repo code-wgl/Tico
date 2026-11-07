@@ -228,6 +228,9 @@ struct MarkdownNoteEditor: NSViewRepresentable {
         if startSeparating { DispatchQueue.main.async { [weak view] in view?.separateAllTaskGroups() } }
     }
 
+}
+
+extension MarkdownNoteEditor {
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         private static let inlinePatterns: [(NSRegularExpression, MarkdownInlineFormat)] = [
             (#"`([^`\n]+)`"#, .code),
@@ -360,6 +363,10 @@ struct MarkdownNoteEditor: NSViewRepresentable {
             view.scheduleSlashMenuUpdate()
         }
 
+    }
+}
+
+extension MarkdownNoteEditor.Coordinator {
         func applyStyle(to view: NSTextView) {
             guard !view.hasMarkedText(), let storage = view.textStorage else { return }
             let bodyFont = NSFont.preferredFont(forTextStyle: .body)
@@ -587,6 +594,9 @@ struct MarkdownNoteEditor: NSViewRepresentable {
         }
 
         /// Use the CommonMark/GFM parser to identify tables, leaving their source editable.
+}
+
+extension MarkdownNoteEditor.Coordinator {
         private func applyTableStyles(to storage: NSTextStorage, source: NSString, bodyFont: NSFont, view: NSTextView,
                                       visuals: inout [MarkdownTableVisual]) {
             guard source.length > 0, source.range(of: "|").location != NSNotFound else { return }
@@ -702,6 +712,9 @@ struct MarkdownNoteEditor: NSViewRepresentable {
         }
 
         /// HTML spans keep colour and font choices in the Markdown source across restarts/export.
+}
+
+extension MarkdownNoteEditor.Coordinator {
         private func applySavedTextStyles(to storage: NSTextStorage, source: NSString, bodyFont: NSFont) {
             let pattern = #"<span style=\"(color:(?:#[0-9a-fA-F]{6}|inherit)|"#
                 + #"font-family:[^\"<>;]+(?:;font-size:[0-9]{1,3}px)?"#
@@ -815,7 +828,6 @@ struct MarkdownNoteEditor: NSViewRepresentable {
                 }
             }
         }
-    }
 }
 
 private final class MarkdownEditorScrollView: NSScrollView {
@@ -950,6 +962,304 @@ final class MarkdownEditingTextView: NSTextView {
 
     /// Selection changes can arrive after TextKit edits but before textDidChange restyles.
     /// Never use old offsets to redirect a caret or protect hidden task lines.
+    override func deleteBackward(_ sender: Any?) {
+        let hasSelection = selectedRange().length > 0
+        if hasSelection { breakUndoCoalescing() }
+        defer { if hasSelection { breakUndoCoalescing() } }
+        if deleteVisibleSelectionPreservingHiddenTasks() { return }
+        if deleteAcrossHiddenTasks(backward: true) { return }
+        if selectedRange().length == 0, let range = reminderRanges.first(where: { NSMaxRange($0) == selectedRange().location }) {
+            insertText("", replacementRange: range)
+            return
+        }
+        super.deleteBackward(sender)
+    }
+
+    override func deleteForward(_ sender: Any?) {
+        let hasSelection = selectedRange().length > 0
+        if hasSelection { breakUndoCoalescing() }
+        defer { if hasSelection { breakUndoCoalescing() } }
+        if deleteVisibleSelectionPreservingHiddenTasks() { return }
+        if deleteAcrossHiddenTasks(backward: false) { return }
+        if selectedRange().length == 0, let range = reminderRanges.first(where: { $0.location == selectedRange().location }) {
+            insertText("", replacementRange: range)
+            return
+        }
+        super.deleteForward(sender)
+    }
+
+    /// Removing a visible line break must not remove the completed task lines between the two
+    /// visible paragraphs. Move the following visible paragraph before the hidden block instead.
+    var activeSeparatorRange: NSRange?
+    var separatorColor = NSColor.separatorColor
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        needsDisplay = true
+    }
+
+    /// Recompute the ranges while drawing so IME composition never leaves a stale background.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tableTrackingArea { removeTrackingArea(tableTrackingArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.activeAlways, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tableTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let next = insertionHandle(at: convert(event.locationInWindow, from: nil))
+        if tableInsertionHandle != next {
+            tableInsertionHandle = next
+            needsDisplay = true
+        }
+        if next != nil { NSCursor.pointingHand.set() }
+        else { super.mouseMoved(with: event) }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if tableInsertionHandle != nil { tableInsertionHandle = nil; needsDisplay = true }
+        super.mouseExited(with: event)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawBackgrounds(in: dirtyRect)
+        super.draw(dirtyRect)
+        guard let layoutManager, let textContainer else { return }
+        drawOrderedMarkersAndQuotes(in: dirtyRect, layoutManager: layoutManager, textContainer: textContainer)
+        drawTableGrid(in: dirtyRect)
+        drawTaskMarkers(in: dirtyRect, layoutManager: layoutManager, textContainer: textContainer)
+        drawStickyHeaders(in: dirtyRect)
+    }
+
+    var knownImageIDs: Set<String> = []
+    var onPasteImage: ((Data, @escaping (String, Data) -> Void) -> Void)?
+    private var lastImageWidth: CGFloat = 0
+
+    private var pendingFocus = false
+    private var focusHandled: (() -> Void)?
+    var onAddTask: (() -> Void)?
+
+    override func paste(_ sender: Any?) {
+        if let data = NSPasteboard.general.pastableImageData(), let onPasteImage {
+            onPasteImage(data) { [weak self] marker, thumbnail in
+                guard let self, let image = NSImage(data: thumbnail), !self.hasMarkedText() else { return }
+                let range = self.selectedRange()
+                guard self.shouldChangeText(in: range, replacementString: "\u{FFFC}") else { return }
+                let attachment = InlineNoteAttachment(markdown: marker, image: image, availableWidth: self.bounds.width - 16)
+                self.textStorage?.replaceCharacters(in: range, with: NSAttributedString(attachment: attachment))
+                self.didChangeText()
+                self.setSelectedRange(NSRange(location: range.location + 1, length: 0))
+            }
+        } else if let text = NSPasteboard.general.string(forType: .string), pasteMultilineIntoTask(text) {
+            return
+        } else {
+            pasteAsPlainText(sender)
+        }
+    }
+
+    /// Treat each pasted line like Return in the current task, preserving its nesting level.
+    override func copy(_ sender: Any?) {
+        let before = NSPasteboard.general.changeCount
+        if !copyVisibleTaskSelection() { super.copy(sender) }
+        AppModel.shared.ignoreClipboardCopy(from: window, previousChangeCount: before)
+    }
+
+    override func cut(_ sender: Any?) {
+        let before = NSPasteboard.general.changeCount
+        if isEditable && copyVisibleTaskSelection() { deleteBackward(sender) }
+        else { super.cut(sender) }
+        AppModel.shared.ignoreClipboardCopy(from: window, previousChangeCount: before)
+    }
+
+    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)), NSPasteboard.general.hasPastableImage { return true }
+        if item.action == #selector(undoFromMenu(_:)) { return undoManager?.canUndo == true }
+        if item.action == #selector(redoFromMenu(_:)) { return undoManager?.canRedo == true }
+        if item.action == #selector(tableActionFromMenu(_:)), let menuItem = item as? NSMenuItem,
+           let action = menuItem.representedObject as? String {
+            guard !hasMarkedText(), let location = tableMenuLocation, let table = tableAt(location: location) else { return false }
+            if action == "deleteColumn" { return table.columnWidths.count > 1 }
+            if action == "deleteRow" {
+                let source = string as NSString
+                let start = source.lineRange(for: NSRange(location: min(location, source.length), length: 0)).location
+                guard let row = table.allRows.firstIndex(where: { $0.location == start }) else { return false }
+                return row > 1 || table.allRows.count > 2
+            }
+            return true
+        }
+        if item.action == #selector(applyHeadingFromMenu(_:)) || item.action == #selector(convertListFromMenu(_:)) ||
+            item.action == #selector(quoteFromMenu(_:)) || item.action == #selector(codeBlockFromMenu(_:)) ||
+            item.action == #selector(insertMarkdownBlockFromMenu(_:)) || item.action == #selector(tableActionFromMenu(_:)) { return !hasMarkedText() }
+        let selectionActions: [Selector] = [#selector(boldFromMenu(_:)), #selector(italicFromMenu(_:)),
+            #selector(strikeFromMenu(_:)), #selector(codeFromMenu(_:)), #selector(colorFromMenu(_:)),
+            #selector(chooseTextColor(_:)), #selector(fontFromMenu(_:)), #selector(chooseTextFont(_:)),
+            #selector(fontSizeFromMenu(_:)), #selector(addReminderForSelection(_:)), #selector(addLinkForSelection(_:))]
+        if let action = item.action, selectionActions.contains(action) { return selectedRange().length > 0 }
+        return super.validateUserInterfaceItem(item)
+    }
+    private let slashPopover = NSPopover()
+    private var slashRange: NSRange?
+    private var slashCommands: [SlashCommand] = []
+    private var selectedSlashCommand = 0
+    private var slashUpdateScheduled = false
+    private var tableMenuLocation: Int?
+
+    override func menu(for event: NSEvent) -> NSMenu? { makeContextMenu(for: event) }
+
+    @objc private func undoFromMenu(_ sender: Any?) { undoManager?.undo() }
+    @objc private func redoFromMenu(_ sender: Any?) { undoManager?.redo() }
+    @objc private func boldFromMenu(_ sender: Any?) { applyInlineFormat(.bold) }
+    @objc private func italicFromMenu(_ sender: Any?) { applyInlineFormat(.italic) }
+    @objc private func strikeFromMenu(_ sender: Any?) { applyInlineFormat(.strikethrough) }
+    @objc private func codeFromMenu(_ sender: Any?) { applyInlineFormat(.code) }
+
+    override func changeFont(_ sender: Any?) {
+        guard let manager = sender as? NSFontManager, var selection = fontPanelSelection else { return }
+        let chosen = manager.convert(NSFont.preferredFont(forTextStyle: .body))
+        guard let family = chosen.familyName,
+              family.rangeOfCharacter(from: CharacterSet(charactersIn: "\"<>;")) == nil else { return }
+        let traits = manager.traits(of: chosen)
+        let size = min(144, max(8, Int(chosen.pointSize.rounded())))
+        let weight = traits.contains(.boldFontMask) ? "bold" : "normal"
+        let italic = traits.contains(.italicFontMask) ? "italic" : "normal"
+        replaceStyleSelection(&selection, style: "font-family:\(family);font-size:\(size)px;font-weight:\(weight);font-style:\(italic)")
+        fontPanelSelection = selection
+    }
+
+    private var linkPopover: NSPopover?
+
+    private var reminderPopover: NSPopover?
+
+    override func keyDown(with event: NSEvent) {
+        if slashPopover.isShown && !hasMarkedText() {
+            switch event.keyCode {
+            case 125, 126: // Down / Up
+                let delta = event.keyCode == 125 ? 1 : -1
+                selectedSlashCommand = (selectedSlashCommand + delta + slashCommands.count) % slashCommands.count
+                presentSlashMenu()
+                return
+            case 36, 76, 48: // Return / keypad Enter / Tab
+                if !slashCommands.isEmpty { performSlashCommand(slashCommands[selectedSlashCommand]); return }
+            case 53: // Escape
+                slashPopover.close()
+                slashRange = nil
+                return
+            default: break
+            }
+        }
+        if !hasMarkedText(), handleLinkArrow(event) { return }
+        if !hasMarkedText(), handleTaskKey(event) { return }
+        if !hasMarkedText(), handleListKey(event) { return }
+        super.keyDown(with: event)
+    }
+
+    func requestFocusWhenReady(_ handled: @escaping () -> Void) {
+        pendingFocus = true
+        focusHandled = handled
+        focusWhenAttached()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+        focusWhenAttached()
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option])
+        if modifiers == .command, !hasMarkedText() {
+            if event.keyCode == 11 { applyInlineFormat(.bold); return true }
+            if event.keyCode == 34 { applyInlineFormat(.italic); return true }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard !string.isEmpty else { return super.mouseDown(with: event) }
+        let point = convert(event.locationInWindow, from: nil)
+        if let handle = insertionHandle(at: point) {
+            tableInsertionHandle = nil
+            tableMenuLocation = handle.anchor
+            let item = NSMenuItem()
+            item.representedObject = handle.action
+            tableActionFromMenu(item)
+            needsDisplay = true
+            return
+        }
+        if let table = tableVisuals.first(where: { stickyHeaderRect($0)?.contains(point) == true }),
+           let rect = stickyHeaderRect(table), let cells = table.cells.first, !cells.isEmpty {
+            var edge = rect.minX
+            var column = 0
+            for (index, width) in table.columnWidths.enumerated() {
+                edge += width
+                column = min(index, cells.count - 1)
+                if point.x < edge { break }
+            }
+            let cell = cells[column]
+            window?.makeFirstResponder(self)
+            scrollRangeToVisible(cell)
+            setSelectedRange(NSRange(location: min(NSMaxRange(cell), cell.location + 1), length: 0))
+            return
+        }
+        if let reminder = reminderRanges.first(where: { reminderRects($0).contains { $0.insetBy(dx: -3, dy: -2).contains(point) } }) {
+            reminderClickInProgress = true
+            showReminderPicker(replacing: reminder, editing: true)
+            return
+        }
+        if let marker = taskMarkers.first(where: { marker in
+            !(hideCompletedTasks && marker.checked && !isTaskAwaitingHide(
+                at: (string as NSString).lineRange(for: NSRange(location: marker.range.location, length: 0)).location
+            )) && taskMarkerRect(marker.range)?.insetBy(dx: -4, dy: -4).contains(point) == true
+        }) {
+            window?.makeFirstResponder(self)
+            pendingTaskPointer = PendingTaskPointer(range: marker.range, start: event.locationInWindow,
+                                                    current: event.locationInWindow, moved: false)
+            return
+        }
+        // The indentation before a task is a gutter, not editable whitespace. Ignore clicks
+        // there rather than briefly placing the caret and correcting it after a selection change.
+        if taskMarkers.contains(where: { marker in
+            guard !(hideCompletedTasks && marker.checked && !isTaskAwaitingHide(
+                at: (string as NSString).lineRange(for: NSRange(location: marker.range.location, length: 0)).location
+            )) else { return false }
+            guard let rect = taskMarkerRect(marker.range) else { return false }
+            return point.x < rect.minX - 4 && point.y >= rect.minY - 4 && point.y <= rect.maxY + 4
+        }) { return }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if reminderClickInProgress { return }
+        guard var pending = pendingTaskPointer else { return super.mouseDragged(with: event) }
+        pending.current = event.locationInWindow
+        if hypot(event.locationInWindow.x - pending.start.x, event.locationInWindow.y - pending.start.y) >= 5 {
+            pending.moved = true
+            NSCursor.closedHand.set()
+        }
+        pendingTaskPointer = pending
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if reminderClickInProgress { reminderClickInProgress = false; return }
+        guard let pending = pendingTaskPointer else { return super.mouseUp(with: event) }
+        pendingTaskPointer = nil
+        needsDisplay = true
+        if pending.moved {
+            if !separateCompletedTasks {
+                moveMarkdownTask(marker: pending.range, to: convert(event.locationInWindow, from: nil))
+            }
+            NSCursor.arrow.set()
+        } else {
+            toggleMarkdownTask(pending.range)
+        }
+    }
+
+
+}
+
+extension MarkdownEditingTextView {
     func synchronizeTaskRangesIfNeeded() {
         let current = string
         guard structuralRangeSource != current else { return }
@@ -1008,34 +1318,9 @@ final class MarkdownEditingTextView: NSTextView {
         return kept
     }
 
-    override func deleteBackward(_ sender: Any?) {
-        let hasSelection = selectedRange().length > 0
-        if hasSelection { breakUndoCoalescing() }
-        defer { if hasSelection { breakUndoCoalescing() } }
-        if deleteVisibleSelectionPreservingHiddenTasks() { return }
-        if deleteAcrossHiddenTasks(backward: true) { return }
-        if selectedRange().length == 0, let range = reminderRanges.first(where: { NSMaxRange($0) == selectedRange().location }) {
-            insertText("", replacementRange: range)
-            return
-        }
-        super.deleteBackward(sender)
-    }
+}
 
-    override func deleteForward(_ sender: Any?) {
-        let hasSelection = selectedRange().length > 0
-        if hasSelection { breakUndoCoalescing() }
-        defer { if hasSelection { breakUndoCoalescing() } }
-        if deleteVisibleSelectionPreservingHiddenTasks() { return }
-        if deleteAcrossHiddenTasks(backward: false) { return }
-        if selectedRange().length == 0, let range = reminderRanges.first(where: { $0.location == selectedRange().location }) {
-            insertText("", replacementRange: range)
-            return
-        }
-        super.deleteForward(sender)
-    }
-
-    /// Removing a visible line break must not remove the completed task lines between the two
-    /// visible paragraphs. Move the following visible paragraph before the hidden block instead.
+extension MarkdownEditingTextView {
     private func deleteAcrossHiddenTasks(backward: Bool) -> Bool {
         let selection = selectedRange()
         guard !hasMarkedText(), selection.length == 0, selection.location != NSNotFound,
@@ -1159,9 +1444,9 @@ final class MarkdownEditingTextView: NSTextView {
         window?.makeFirstResponder(self)
         insertText(prefix + "- [ ] ", replacementRange: selection)
     }
-    var activeSeparatorRange: NSRange?
-    var separatorColor = NSColor.separatorColor
+}
 
+extension MarkdownEditingTextView {
     func isEditingSeparator(_ range: NSRange) -> Bool {
         let selection = selectedRange()
         if selection.length == 0 {
@@ -1209,12 +1494,9 @@ final class MarkdownEditingTextView: NSTextView {
         return result
     }
 
-    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
-        needsDisplay = true
-    }
+}
 
-    /// Recompute the ranges while drawing so IME composition never leaves a stale background.
+extension MarkdownEditingTextView {
     private func codeBlocksForDrawing() -> [NSRange] {
         let source = string as NSString
         guard source.length > 0 else { return [] }
@@ -1287,39 +1569,9 @@ final class MarkdownEditingTextView: NSTextView {
         return nil
     }
 
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let tableTrackingArea { removeTrackingArea(tableTrackingArea) }
-        let area = NSTrackingArea(rect: .zero, options: [.activeAlways, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited], owner: self, userInfo: nil)
-        addTrackingArea(area)
-        tableTrackingArea = area
-    }
+}
 
-    override func mouseMoved(with event: NSEvent) {
-        let next = insertionHandle(at: convert(event.locationInWindow, from: nil))
-        if tableInsertionHandle != next {
-            tableInsertionHandle = next
-            needsDisplay = true
-        }
-        if next != nil { NSCursor.pointingHand.set() }
-        else { super.mouseMoved(with: event) }
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        if tableInsertionHandle != nil { tableInsertionHandle = nil; needsDisplay = true }
-        super.mouseExited(with: event)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        drawBackgrounds(in: dirtyRect)
-        super.draw(dirtyRect)
-        guard let layoutManager, let textContainer else { return }
-        drawOrderedMarkersAndQuotes(in: dirtyRect, layoutManager: layoutManager, textContainer: textContainer)
-        drawTableGrid(in: dirtyRect)
-        drawTaskMarkers(in: dirtyRect, layoutManager: layoutManager, textContainer: textContainer)
-        drawStickyHeaders(in: dirtyRect)
-    }
-
+extension MarkdownEditingTextView {
     private func drawBackgrounds(in dirtyRect: NSRect) {
         for table in tableVisuals {
             guard let geometry = tableGeometry(table), geometry.rect.intersects(dirtyRect) else { continue }
@@ -1562,10 +1814,9 @@ final class MarkdownEditingTextView: NSTextView {
         }
         return rectangles
     }
-    var knownImageIDs: Set<String> = []
-    var onPasteImage: ((Data, @escaping (String, Data) -> Void) -> Void)?
-    private var lastImageWidth: CGFloat = 0
+}
 
+extension MarkdownEditingTextView {
     func updateImageWidths(_ width: CGFloat) {
         guard width > 0, abs(width - lastImageWidth) > 0.5, let storage = textStorage else { return }
         lastImageWidth = width
@@ -1687,29 +1938,9 @@ final class MarkdownEditingTextView: NSTextView {
         guard NSMaxRange(mapped) <= localSource.length else { return local }
         return localSource.replacingCharacters(in: mapped, with: replacement)
     }
-    private var pendingFocus = false
-    private var focusHandled: (() -> Void)?
-    var onAddTask: (() -> Void)?
+}
 
-    override func paste(_ sender: Any?) {
-        if let data = NSPasteboard.general.pastableImageData(), let onPasteImage {
-            onPasteImage(data) { [weak self] marker, thumbnail in
-                guard let self, let image = NSImage(data: thumbnail), !self.hasMarkedText() else { return }
-                let range = self.selectedRange()
-                guard self.shouldChangeText(in: range, replacementString: "\u{FFFC}") else { return }
-                let attachment = InlineNoteAttachment(markdown: marker, image: image, availableWidth: self.bounds.width - 16)
-                self.textStorage?.replaceCharacters(in: range, with: NSAttributedString(attachment: attachment))
-                self.didChangeText()
-                self.setSelectedRange(NSRange(location: range.location + 1, length: 0))
-            }
-        } else if let text = NSPasteboard.general.string(forType: .string), pasteMultilineIntoTask(text) {
-            return
-        } else {
-            pasteAsPlainText(sender)
-        }
-    }
-
-    /// Treat each pasted line like Return in the current task, preserving its nesting level.
+extension MarkdownEditingTextView {
     private func pasteMultilineIntoTask(_ raw: String) -> Bool {
         guard !hasMarkedText(), let storage = textStorage else { return false }
         let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
@@ -1801,52 +2032,9 @@ final class MarkdownEditingTextView: NSTextView {
         return true
     }
 
-    override func copy(_ sender: Any?) {
-        let before = NSPasteboard.general.changeCount
-        if !copyVisibleTaskSelection() { super.copy(sender) }
-        AppModel.shared.ignoreClipboardCopy(from: window, previousChangeCount: before)
-    }
+}
 
-    override func cut(_ sender: Any?) {
-        let before = NSPasteboard.general.changeCount
-        if isEditable && copyVisibleTaskSelection() { deleteBackward(sender) }
-        else { super.cut(sender) }
-        AppModel.shared.ignoreClipboardCopy(from: window, previousChangeCount: before)
-    }
-
-    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
-        if item.action == #selector(paste(_:)), NSPasteboard.general.hasPastableImage { return true }
-        if item.action == #selector(undoFromMenu(_:)) { return undoManager?.canUndo == true }
-        if item.action == #selector(redoFromMenu(_:)) { return undoManager?.canRedo == true }
-        if item.action == #selector(tableActionFromMenu(_:)), let menuItem = item as? NSMenuItem,
-           let action = menuItem.representedObject as? String {
-            guard !hasMarkedText(), let location = tableMenuLocation, let table = tableAt(location: location) else { return false }
-            if action == "deleteColumn" { return table.columnWidths.count > 1 }
-            if action == "deleteRow" {
-                let source = string as NSString
-                let start = source.lineRange(for: NSRange(location: min(location, source.length), length: 0)).location
-                guard let row = table.allRows.firstIndex(where: { $0.location == start }) else { return false }
-                return row > 1 || table.allRows.count > 2
-            }
-            return true
-        }
-        if item.action == #selector(applyHeadingFromMenu(_:)) || item.action == #selector(convertListFromMenu(_:)) ||
-            item.action == #selector(quoteFromMenu(_:)) || item.action == #selector(codeBlockFromMenu(_:)) ||
-            item.action == #selector(insertMarkdownBlockFromMenu(_:)) || item.action == #selector(tableActionFromMenu(_:)) { return !hasMarkedText() }
-        let selectionActions: [Selector] = [#selector(boldFromMenu(_:)), #selector(italicFromMenu(_:)),
-            #selector(strikeFromMenu(_:)), #selector(codeFromMenu(_:)), #selector(colorFromMenu(_:)),
-            #selector(chooseTextColor(_:)), #selector(fontFromMenu(_:)), #selector(chooseTextFont(_:)),
-            #selector(fontSizeFromMenu(_:)), #selector(addReminderForSelection(_:)), #selector(addLinkForSelection(_:))]
-        if let action = item.action, selectionActions.contains(action) { return selectedRange().length > 0 }
-        return super.validateUserInterfaceItem(item)
-    }
-    private let slashPopover = NSPopover()
-    private var slashRange: NSRange?
-    private var slashCommands: [SlashCommand] = []
-    private var selectedSlashCommand = 0
-    private var slashUpdateScheduled = false
-    private var tableMenuLocation: Int?
-
+extension MarkdownEditingTextView {
     func scheduleSlashMenuUpdate() {
         guard !slashUpdateScheduled else { return }
         slashUpdateScheduled = true
@@ -1939,116 +2127,9 @@ final class MarkdownEditingTextView: NSTextView {
         window?.makeFirstResponder(self)
     }
 
-    override func menu(for event: NSEvent) -> NSMenu? {
-        let menu = NSMenu()
-        func add(_ title: String, _ action: Selector, key: String = "", to destination: NSMenu? = nil, object: Any? = nil) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-            item.target = self
-            item.representedObject = object
-            (destination ?? menu).addItem(item)
-        }
-        let point = convert(event.locationInWindow, from: nil)
-        let clicked = characterIndexForInsertion(at: point)
-        tableMenuLocation = clicked
-        if let table = tableAt(location: clicked) {
-            // Keep table actions in the main menu: nested menus can be squeezed at screen edges.
-            add(AppLanguage.text("在上方插入行", "Insert Row Above"), #selector(tableActionFromMenu(_:)), object: "rowAbove")
-            add(AppLanguage.text("在下方插入行", "Insert Row Below"), #selector(tableActionFromMenu(_:)), object: "rowBelow")
-            add(AppLanguage.text("在左侧插入列", "Insert Column Left"), #selector(tableActionFromMenu(_:)), object: "columnLeft")
-            add(AppLanguage.text("在右侧插入列", "Insert Column Right"), #selector(tableActionFromMenu(_:)), object: "columnRight")
-            add(AppLanguage.text("删除当前行", "Delete Row"), #selector(tableActionFromMenu(_:)), object: "deleteRow")
-            add(AppLanguage.text("删除当前列", "Delete Column"), #selector(tableActionFromMenu(_:)), object: "deleteColumn")
-            add(table.sticky ? AppLanguage.text("取消固定表头", "Unfreeze Header") : AppLanguage.text("固定表头", "Freeze Header"),
-                #selector(tableActionFromMenu(_:)), object: "sticky")
-            menu.addItem(.separator())
-        }
-        add(AppLanguage.text("撤销", "Undo"), #selector(undoFromMenu(_:)), key: "z")
-        add(AppLanguage.text("重做", "Redo"), #selector(redoFromMenu(_:)))
-        menu.addItem(.separator())
-        add(AppLanguage.text("剪切", "Cut"), #selector(cut(_:)), key: "x")
-        add(AppLanguage.text("复制", "Copy"), #selector(copy(_:)), key: "c")
-        add(AppLanguage.text("粘贴", "Paste"), #selector(paste(_:)), key: "v")
-        add(AppLanguage.text("全选", "Select All"), #selector(selectAll(_:)), key: "a")
-        menu.addItem(.separator())
-        let heading = NSMenu(title: AppLanguage.text("段落样式", "Paragraph Style"))
-        for (label, level) in [(AppLanguage.text("正文", "Body"), 0), (AppLanguage.text("一级标题", "Heading 1"), 1),
-                               (AppLanguage.text("二级标题", "Heading 2"), 2), (AppLanguage.text("三级标题", "Heading 3"), 3),
-                               (AppLanguage.text("四级标题", "Heading 4"), 4), (AppLanguage.text("五级标题", "Heading 5"), 5),
-                               (AppLanguage.text("六级标题", "Heading 6"), 6)] {
-            add(label, #selector(applyHeadingFromMenu(_:)), to: heading, object: level)
-        }
-        let headingItem = NSMenuItem(title: heading.title, action: nil, keyEquivalent: "")
-        headingItem.submenu = heading
-        menu.addItem(headingItem)
-        let lists = NSMenu(title: AppLanguage.text("转换为列表", "Convert to List"))
-        for (label, style) in [(AppLanguage.text("任务", "Task"), "task"),
-                               (AppLanguage.text("无序列表", "Bulleted List"), "bullet"),
-                               (AppLanguage.text("有序列表", "Numbered List"), "numbered")] {
-            add(label, #selector(convertListFromMenu(_:)), to: lists, object: style)
-        }
-        let listsItem = NSMenuItem(title: lists.title, action: nil, keyEquivalent: "")
-        listsItem.submenu = lists
-        menu.addItem(listsItem)
-        add(AppLanguage.text("引用", "Quote"), #selector(quoteFromMenu(_:)))
-        add(AppLanguage.text("代码块", "Code Block"), #selector(codeBlockFromMenu(_:)))
-        let insert = NSMenu(title: AppLanguage.text("插入", "Insert"))
-        add(AppLanguage.text("分割线", "Divider"), #selector(insertMarkdownBlockFromMenu(_:)), to: insert, object: "divider")
-        add(AppLanguage.text("表格", "Table"), #selector(insertMarkdownBlockFromMenu(_:)), to: insert, object: "table")
-        let insertItem = NSMenuItem(title: insert.title, action: nil, keyEquivalent: "")
-        insertItem.submenu = insert
-        menu.addItem(insertItem)
-        add(AppLanguage.text("粗体", "Bold"), #selector(boldFromMenu(_:)), key: "b")
-        add(AppLanguage.text("斜体", "Italic"), #selector(italicFromMenu(_:)), key: "i")
-        add(AppLanguage.text("删除线", "Strikethrough"), #selector(strikeFromMenu(_:)))
-        add(AppLanguage.text("行内代码", "Inline Code"), #selector(codeFromMenu(_:)))
-        let colors = NSMenu(title: AppLanguage.text("文字颜色", "Text Color"))
-        add(AppLanguage.text("默认颜色", "Default Color"), #selector(colorFromMenu(_:)), to: colors, object: "inherit")
-        colors.addItem(.separator())
-        for (label, hex) in [("黑色", "252525"), ("灰色", "707780"), ("红色", "D63838"), ("橙色", "C46A14"),
-                             ("绿色", "28834C"), ("蓝色", "1769C2"), ("紫色", "884BB0")] {
-            add(AppLanguage.isChinese ? label : ["黑色":"Black", "灰色":"Gray", "红色":"Red", "橙色":"Orange", "绿色":"Green", "蓝色":"Blue", "紫色":"Purple"][label] ?? label,
-                #selector(colorFromMenu(_:)), to: colors, object: hex)
-        }
-        colors.addItem(.separator())
-        add(AppLanguage.text("自选颜色…", "Choose Color…"), #selector(chooseTextColor(_:)), to: colors)
-        let colorItem = NSMenuItem(title: colors.title, action: nil, keyEquivalent: "")
-        colorItem.submenu = colors
-        menu.addItem(colorItem)
-        let fontMenu = NSMenu(title: AppLanguage.text("字体", "Font"))
-        for (label, family) in [(AppLanguage.text("系统字体", "System"), "system-ui"), ("苹方", "PingFang SC"),
-                                ("黑体", "Heiti SC"), ("宋体", "Songti SC"), ("Helvetica", "Helvetica"),
-                                ("Georgia", "Georgia"), (AppLanguage.text("等宽", "Monospace"), "Menlo")] {
-            if NSFontManager.shared.availableFontFamilies.contains(family) || family == "system-ui" {
-                add(label, #selector(fontFromMenu(_:)), to: fontMenu, object: family)
-            }
-        }
-        fontMenu.addItem(.separator())
-        add(AppLanguage.text("更多字体…", "Show Fonts…"), #selector(chooseTextFont(_:)), to: fontMenu)
-        let fontItem = NSMenuItem(title: fontMenu.title, action: nil, keyEquivalent: "")
-        fontItem.submenu = fontMenu
-        menu.addItem(fontItem)
-        let sizes = NSMenu(title: AppLanguage.text("字号", "Font Size"))
-        for size in [10, 12, 14, 16, 18, 20, 24, 28, 36] {
-            add("\(size)", #selector(fontSizeFromMenu(_:)), to: sizes, object: size)
-        }
-        let sizeItem = NSMenuItem(title: sizes.title, action: nil, keyEquivalent: "")
-        sizeItem.submenu = sizes
-        menu.addItem(sizeItem)
-        if selectedRange().length > 0 {
-            menu.addItem(.separator())
-            add(AppLanguage.text("添加链接…", "Add Link…"), #selector(addLinkForSelection(_:)))
-            add(AppLanguage.text("添加提醒…", "Add Reminder…"), #selector(addReminderForSelection(_:)))
-        }
-        return menu
-    }
+}
 
-    @objc private func undoFromMenu(_ sender: Any?) { undoManager?.undo() }
-    @objc private func redoFromMenu(_ sender: Any?) { undoManager?.redo() }
-    @objc private func boldFromMenu(_ sender: Any?) { applyInlineFormat(.bold) }
-    @objc private func italicFromMenu(_ sender: Any?) { applyInlineFormat(.italic) }
-    @objc private func strikeFromMenu(_ sender: Any?) { applyInlineFormat(.strikethrough) }
-    @objc private func codeFromMenu(_ sender: Any?) { applyInlineFormat(.code) }
-
+extension MarkdownEditingTextView {
     private func tableAt(location: Int) -> MarkdownTableVisual? {
         guard tableVisualSource == string else { return nil }
         let source = string as NSString
@@ -2332,6 +2413,9 @@ final class MarkdownEditingTextView: NSTextView {
         applyTextStyle("font-size:\(size)px")
     }
 
+}
+
+extension MarkdownEditingTextView {
     private func captureStyleSelection() -> StylePanelSelection? {
         let selection = selectedRange(), source = string as NSString
         guard !hasMarkedText(), selection.location != NSNotFound, selection.length > 0,
@@ -2413,139 +2497,9 @@ final class MarkdownEditingTextView: NSTextView {
         manager.fontPanel(true)?.makeKeyAndOrderFront(nil)
     }
 
-    override func changeFont(_ sender: Any?) {
-        guard let manager = sender as? NSFontManager, var selection = fontPanelSelection else { return }
-        let chosen = manager.convert(NSFont.preferredFont(forTextStyle: .body))
-        guard let family = chosen.familyName,
-              family.rangeOfCharacter(from: CharacterSet(charactersIn: "\"<>;")) == nil else { return }
-        let traits = manager.traits(of: chosen)
-        let size = min(144, max(8, Int(chosen.pointSize.rounded())))
-        let weight = traits.contains(.boldFontMask) ? "bold" : "normal"
-        let italic = traits.contains(.italicFontMask) ? "italic" : "normal"
-        replaceStyleSelection(&selection, style: "font-family:\(family);font-size:\(size)px;font-weight:\(weight);font-style:\(italic)")
-        fontPanelSelection = selection
-    }
+}
 
-    @objc private func addLinkForSelection(_ sender: Any?) {
-        guard let selected = captureStyleSelection(), let layoutManager, let textContainer else { return }
-        guard !selected.original.contains("\n"), !selected.original.contains("\r"),
-              !selected.original.contains("]") else {
-            let alert = NSAlert()
-            alert.messageText = AppLanguage.text("请选择单行文字", "Select text on one line")
-            alert.informativeText = AppLanguage.text("链接文字不能跨行或包含右方括号。", "Link text cannot contain a line break or a closing bracket.")
-            alert.runModal()
-            return
-        }
-        let source = selected.expected as NSString
-        let line = source.lineRange(for: selected.range)
-        let expression = try? NSRegularExpression(pattern: #"\[([^\]\n]+)\]\((https?://[^\s)]+|mailto:[^\s)]+)\)"#)
-        let existing = expression?.matches(in: selected.expected, range: line).first { $0.range(at: 1) == selected.range }
-        let replaceRange = existing?.range ?? selected.range
-        let initialURL = existing.map { source.substring(with: $0.range(at: 2)) } ?? ""
-        let popover = NSPopover()
-        let picker = LinkEditor(initialURL: initialURL, editing: existing != nil, save: { [weak self, weak popover] url in
-            guard let self, self.string == selected.expected,
-                  NSMaxRange(replaceRange) <= (self.string as NSString).length else { return }
-            let replacement = "[\(selected.original)](\(url))"
-            self.breakUndoCoalescing()
-            self.insertText(replacement, replacementRange: replaceRange)
-            self.breakUndoCoalescing()
-            self.setSelectedRange(NSRange(location: replaceRange.location + 1, length: (selected.original as NSString).length))
-            popover?.close()
-            self.window?.makeFirstResponder(self)
-        }, cancel: { [weak popover] in popover?.close() })
-        let controller = NSViewController()
-        controller.view = NSHostingView(rootView: LocalizedRoot { picker })
-        popover.contentViewController = controller
-        popover.contentSize = NSSize(width: 320, height: 146)
-        popover.behavior = .transient
-        linkPopover = popover
-        let glyph = layoutManager.glyphIndexForCharacter(at: selected.range.location)
-        let rect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer)
-            .offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
-        popover.show(relativeTo: rect, of: self, preferredEdge: .maxY)
-    }
-
-    private var linkPopover: NSPopover?
-
-    @objc private func addReminderForSelection(_ sender: Any?) {
-        let selection = selectedRange()
-        guard selection.length > 0 else { return }
-        showReminderPicker(replacing: NSRange(location: NSMaxRange(selection), length: 0))
-    }
-
-    private func showReminderPicker(replacing range: NSRange, editing: Bool = false) {
-        guard let layoutManager, let textContainer, NSMaxRange(range) <= (string as NSString).length else { return }
-        let snapshot = string
-        let popover = NSPopover()
-        let original = (snapshot as NSString).substring(with: range)
-        let savedDate = editing ? ReminderScheduler.formatter().date(from: original.replacingOccurrences(of: "⏰", with: "").trimmingCharacters(in: .whitespaces)) : nil
-        let remove: (() -> Void)? = editing ? { [weak self, weak popover] in
-            guard let self, self.string == snapshot else { return }
-            self.insertText("", replacementRange: range)
-            popover?.close()
-            self.window?.makeFirstResponder(self)
-        } : nil
-        let view = ReminderPicker(date: savedDate ?? Date().addingTimeInterval(3600), save: { [weak self, weak popover] date in
-            guard let self else { return }
-            Task { @MainActor in
-                do {
-                    guard try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) else {
-                        let alert = NSAlert()
-                        alert.messageText = AppLanguage.text("请在系统设置中允许 Tico 通知", "Allow Tico notifications in System Settings")
-                        alert.runModal()
-                        return
-                    }
-                    let formatter = ReminderScheduler.formatter()
-                    let formatted = formatter.string(from: date)
-                    guard self.string == snapshot, let rounded = formatter.date(from: formatted), rounded > Date() else { return }
-                    let marker = (editing ? "⏰ " : " ⏰ ") + formatted
-                    self.insertText(marker, replacementRange: range)
-                    popover?.close()
-                    self.window?.makeFirstResponder(self)
-                } catch {
-                    let alert = NSAlert(error: error)
-                    alert.runModal()
-                }
-            }
-        }, remove: remove)
-        let controller = NSViewController()
-        controller.view = NSHostingView(rootView: LocalizedRoot { view })
-        popover.contentViewController = controller
-        popover.contentSize = NSSize(width: 280, height: 130)
-        popover.behavior = .transient
-        reminderPopover = popover
-        let glyph = layoutManager.glyphIndexForCharacter(at: max(0, min(range.location, max(0, (string as NSString).length - 1))))
-        let rect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer)
-            .offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
-        popover.show(relativeTo: rect, of: self, preferredEdge: .maxY)
-    }
-
-    private var reminderPopover: NSPopover?
-
-    override func keyDown(with event: NSEvent) {
-        if slashPopover.isShown && !hasMarkedText() {
-            switch event.keyCode {
-            case 125, 126: // Down / Up
-                let delta = event.keyCode == 125 ? 1 : -1
-                selectedSlashCommand = (selectedSlashCommand + delta + slashCommands.count) % slashCommands.count
-                presentSlashMenu()
-                return
-            case 36, 76, 48: // Return / keypad Enter / Tab
-                if !slashCommands.isEmpty { performSlashCommand(slashCommands[selectedSlashCommand]); return }
-            case 53: // Escape
-                slashPopover.close()
-                slashRange = nil
-                return
-            default: break
-            }
-        }
-        if !hasMarkedText(), handleLinkArrow(event) { return }
-        if !hasMarkedText(), handleTaskKey(event) { return }
-        if !hasMarkedText(), handleListKey(event) { return }
-        super.keyDown(with: event)
-    }
-
+extension MarkdownEditingTextView {
     private func handleListKey(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option])
         let selection = selectedRange(), source = string as NSString
@@ -2709,160 +2663,9 @@ final class MarkdownEditingTextView: NSTextView {
         return false
     }
 
-    func requestFocusWhenReady(_ handled: @escaping () -> Void) {
-        pendingFocus = true
-        focusHandled = handled
-        focusWhenAttached()
-    }
+}
 
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        window?.acceptsMouseMovedEvents = true
-        focusWhenAttached()
-    }
-
-    private func focusWhenAttached() {
-        guard pendingFocus, window != nil else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.pendingFocus, let window = self.window else { return }
-            if window.makeFirstResponder(self) {
-                self.setSelectedRange(NSRange(location: (self.string as NSString).length, length: 0))
-                self.pendingFocus = false
-                self.focusHandled?()
-                self.focusHandled = nil
-            }
-        }
-    }
-
-    func applyInlineFormat(_ format: MarkdownInlineFormat) {
-        guard !hasMarkedText() else { return }
-        let source = string as NSString
-        let selection = selectedRange()
-        guard selection.location != NSNotFound, NSMaxRange(selection) <= source.length else { return }
-        guard !hiddenTaskRanges.contains(where: { NSIntersectionRange(selection, $0).length > 0 }) else { NSSound.beep(); return }
-        var containsAttachment = false
-        if selection.length > 0 {
-            textStorage?.enumerateAttribute(.attachment, in: selection) { value, _, stop in
-                if value is InlineNoteAttachment { containsAttachment = true; stop.pointee = true }
-            }
-        }
-        guard !containsAttachment else { NSSound.beep(); return }
-        let marker = format.marker
-        let markerLength = (marker as NSString).length
-        let selectedText = source.substring(with: selection)
-        let replacement: String
-        let newSelection: NSRange
-        if selection.length >= markerLength * 2 && selectedText.hasPrefix(marker) && selectedText.hasSuffix(marker) {
-            let selected = selectedText as NSString
-            replacement = selected.substring(with: NSRange(location: markerLength, length: selected.length - markerLength * 2))
-            newSelection = NSRange(location: selection.location, length: (replacement as NSString).length)
-        } else if selection.location >= markerLength && NSMaxRange(selection) + markerLength <= source.length,
-                  source.substring(with: NSRange(location: selection.location - markerLength, length: markerLength)) == marker,
-                  source.substring(with: NSRange(location: NSMaxRange(selection), length: markerLength)) == marker {
-            let enclosing = NSRange(location: selection.location - markerLength, length: selection.length + markerLength * 2)
-            insertText(selectedText, replacementRange: enclosing)
-            setSelectedRange(NSRange(location: enclosing.location, length: selection.length))
-            window?.makeFirstResponder(self)
-            return
-        } else {
-            replacement = marker + selectedText + marker
-            newSelection = NSRange(location: selection.location + markerLength, length: selection.length)
-        }
-        insertText(replacement, replacementRange: selection)
-        setSelectedRange(newSelection)
-        window?.makeFirstResponder(self)
-    }
-
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option])
-        if modifiers == .command, !hasMarkedText() {
-            if event.keyCode == 11 { applyInlineFormat(.bold); return true }
-            if event.keyCode == 34 { applyInlineFormat(.italic); return true }
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        guard !string.isEmpty else { return super.mouseDown(with: event) }
-        let point = convert(event.locationInWindow, from: nil)
-        if let handle = insertionHandle(at: point) {
-            tableInsertionHandle = nil
-            tableMenuLocation = handle.anchor
-            let item = NSMenuItem()
-            item.representedObject = handle.action
-            tableActionFromMenu(item)
-            needsDisplay = true
-            return
-        }
-        if let table = tableVisuals.first(where: { stickyHeaderRect($0)?.contains(point) == true }),
-           let rect = stickyHeaderRect(table), let cells = table.cells.first, !cells.isEmpty {
-            var edge = rect.minX
-            var column = 0
-            for (index, width) in table.columnWidths.enumerated() {
-                edge += width
-                column = min(index, cells.count - 1)
-                if point.x < edge { break }
-            }
-            let cell = cells[column]
-            window?.makeFirstResponder(self)
-            scrollRangeToVisible(cell)
-            setSelectedRange(NSRange(location: min(NSMaxRange(cell), cell.location + 1), length: 0))
-            return
-        }
-        if let reminder = reminderRanges.first(where: { reminderRects($0).contains { $0.insetBy(dx: -3, dy: -2).contains(point) } }) {
-            reminderClickInProgress = true
-            showReminderPicker(replacing: reminder, editing: true)
-            return
-        }
-        if let marker = taskMarkers.first(where: { marker in
-            !(hideCompletedTasks && marker.checked && !isTaskAwaitingHide(
-                at: (string as NSString).lineRange(for: NSRange(location: marker.range.location, length: 0)).location
-            )) && taskMarkerRect(marker.range)?.insetBy(dx: -4, dy: -4).contains(point) == true
-        }) {
-            window?.makeFirstResponder(self)
-            pendingTaskPointer = PendingTaskPointer(range: marker.range, start: event.locationInWindow,
-                                                    current: event.locationInWindow, moved: false)
-            return
-        }
-        // The indentation before a task is a gutter, not editable whitespace. Ignore clicks
-        // there rather than briefly placing the caret and correcting it after a selection change.
-        if taskMarkers.contains(where: { marker in
-            guard !(hideCompletedTasks && marker.checked && !isTaskAwaitingHide(
-                at: (string as NSString).lineRange(for: NSRange(location: marker.range.location, length: 0)).location
-            )) else { return false }
-            guard let rect = taskMarkerRect(marker.range) else { return false }
-            return point.x < rect.minX - 4 && point.y >= rect.minY - 4 && point.y <= rect.maxY + 4
-        }) { return }
-        super.mouseDown(with: event)
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        if reminderClickInProgress { return }
-        guard var pending = pendingTaskPointer else { return super.mouseDragged(with: event) }
-        pending.current = event.locationInWindow
-        if hypot(event.locationInWindow.x - pending.start.x, event.locationInWindow.y - pending.start.y) >= 5 {
-            pending.moved = true
-            NSCursor.closedHand.set()
-        }
-        pendingTaskPointer = pending
-        needsDisplay = true
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        if reminderClickInProgress { reminderClickInProgress = false; return }
-        guard let pending = pendingTaskPointer else { return super.mouseUp(with: event) }
-        pendingTaskPointer = nil
-        needsDisplay = true
-        if pending.moved {
-            if !separateCompletedTasks {
-                moveMarkdownTask(marker: pending.range, to: convert(event.locationInWindow, from: nil))
-            }
-            NSCursor.arrow.set()
-        } else {
-            toggleMarkdownTask(pending.range)
-        }
-    }
-
+extension MarkdownEditingTextView {
     private struct TaskLine {
         let line: NSRange
         let indent: NSRange
@@ -3192,5 +2995,264 @@ final class MarkdownEditingTextView: NSTextView {
         storage.setAttributedString(result)
         didChangeText()
         setSelectedRange(NSRange(location: min(position, storage.length), length: 0))
+    }}
+
+extension MarkdownEditingTextView {
+    private func makeContextMenu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector, key: String = "", to destination: NSMenu? = nil, object: Any? = nil) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.target = self
+            item.representedObject = object
+            (destination ?? menu).addItem(item)
+        }
+        let point = convert(event.locationInWindow, from: nil)
+        let clicked = characterIndexForInsertion(at: point)
+        tableMenuLocation = clicked
+        if let table = tableAt(location: clicked) {
+            // Keep table actions in the main menu: nested menus can be squeezed at screen edges.
+            add(AppLanguage.text("在上方插入行", "Insert Row Above"), #selector(tableActionFromMenu(_:)), object: "rowAbove")
+            add(AppLanguage.text("在下方插入行", "Insert Row Below"), #selector(tableActionFromMenu(_:)), object: "rowBelow")
+            add(AppLanguage.text("在左侧插入列", "Insert Column Left"), #selector(tableActionFromMenu(_:)), object: "columnLeft")
+            add(AppLanguage.text("在右侧插入列", "Insert Column Right"), #selector(tableActionFromMenu(_:)), object: "columnRight")
+            add(AppLanguage.text("删除当前行", "Delete Row"), #selector(tableActionFromMenu(_:)), object: "deleteRow")
+            add(AppLanguage.text("删除当前列", "Delete Column"), #selector(tableActionFromMenu(_:)), object: "deleteColumn")
+            add(table.sticky ? AppLanguage.text("取消固定表头", "Unfreeze Header") : AppLanguage.text("固定表头", "Freeze Header"),
+                #selector(tableActionFromMenu(_:)), object: "sticky")
+            menu.addItem(.separator())
+        }
+        add(AppLanguage.text("撤销", "Undo"), #selector(undoFromMenu(_:)), key: "z")
+        add(AppLanguage.text("重做", "Redo"), #selector(redoFromMenu(_:)))
+        menu.addItem(.separator())
+        add(AppLanguage.text("剪切", "Cut"), #selector(cut(_:)), key: "x")
+        add(AppLanguage.text("复制", "Copy"), #selector(copy(_:)), key: "c")
+        add(AppLanguage.text("粘贴", "Paste"), #selector(paste(_:)), key: "v")
+        add(AppLanguage.text("全选", "Select All"), #selector(selectAll(_:)), key: "a")
+        menu.addItem(.separator())
+        let heading = NSMenu(title: AppLanguage.text("段落样式", "Paragraph Style"))
+        for (label, level) in [(AppLanguage.text("正文", "Body"), 0), (AppLanguage.text("一级标题", "Heading 1"), 1),
+                               (AppLanguage.text("二级标题", "Heading 2"), 2), (AppLanguage.text("三级标题", "Heading 3"), 3),
+                               (AppLanguage.text("四级标题", "Heading 4"), 4), (AppLanguage.text("五级标题", "Heading 5"), 5),
+                               (AppLanguage.text("六级标题", "Heading 6"), 6)] {
+            add(label, #selector(applyHeadingFromMenu(_:)), to: heading, object: level)
+        }
+        let headingItem = NSMenuItem(title: heading.title, action: nil, keyEquivalent: "")
+        headingItem.submenu = heading
+        menu.addItem(headingItem)
+        let lists = NSMenu(title: AppLanguage.text("转换为列表", "Convert to List"))
+        for (label, style) in [(AppLanguage.text("任务", "Task"), "task"),
+                               (AppLanguage.text("无序列表", "Bulleted List"), "bullet"),
+                               (AppLanguage.text("有序列表", "Numbered List"), "numbered")] {
+            add(label, #selector(convertListFromMenu(_:)), to: lists, object: style)
+        }
+        let listsItem = NSMenuItem(title: lists.title, action: nil, keyEquivalent: "")
+        listsItem.submenu = lists
+        menu.addItem(listsItem)
+        add(AppLanguage.text("引用", "Quote"), #selector(quoteFromMenu(_:)))
+        add(AppLanguage.text("代码块", "Code Block"), #selector(codeBlockFromMenu(_:)))
+        let insert = NSMenu(title: AppLanguage.text("插入", "Insert"))
+        add(AppLanguage.text("分割线", "Divider"), #selector(insertMarkdownBlockFromMenu(_:)), to: insert, object: "divider")
+        add(AppLanguage.text("表格", "Table"), #selector(insertMarkdownBlockFromMenu(_:)), to: insert, object: "table")
+        let insertItem = NSMenuItem(title: insert.title, action: nil, keyEquivalent: "")
+        insertItem.submenu = insert
+        menu.addItem(insertItem)
+        add(AppLanguage.text("粗体", "Bold"), #selector(boldFromMenu(_:)), key: "b")
+        add(AppLanguage.text("斜体", "Italic"), #selector(italicFromMenu(_:)), key: "i")
+        add(AppLanguage.text("删除线", "Strikethrough"), #selector(strikeFromMenu(_:)))
+        add(AppLanguage.text("行内代码", "Inline Code"), #selector(codeFromMenu(_:)))
+        let colors = NSMenu(title: AppLanguage.text("文字颜色", "Text Color"))
+        add(AppLanguage.text("默认颜色", "Default Color"), #selector(colorFromMenu(_:)), to: colors, object: "inherit")
+        colors.addItem(.separator())
+        for (label, hex) in [("黑色", "252525"), ("灰色", "707780"), ("红色", "D63838"), ("橙色", "C46A14"),
+                             ("绿色", "28834C"), ("蓝色", "1769C2"), ("紫色", "884BB0")] {
+            add(AppLanguage.isChinese ? label : ["黑色":"Black", "灰色":"Gray", "红色":"Red", "橙色":"Orange", "绿色":"Green", "蓝色":"Blue", "紫色":"Purple"][label] ?? label,
+                #selector(colorFromMenu(_:)), to: colors, object: hex)
+        }
+        colors.addItem(.separator())
+        add(AppLanguage.text("自选颜色…", "Choose Color…"), #selector(chooseTextColor(_:)), to: colors)
+        let colorItem = NSMenuItem(title: colors.title, action: nil, keyEquivalent: "")
+        colorItem.submenu = colors
+        menu.addItem(colorItem)
+        let fontMenu = NSMenu(title: AppLanguage.text("字体", "Font"))
+        for (label, family) in [(AppLanguage.text("系统字体", "System"), "system-ui"), ("苹方", "PingFang SC"),
+                                ("黑体", "Heiti SC"), ("宋体", "Songti SC"), ("Helvetica", "Helvetica"),
+                                ("Georgia", "Georgia"), (AppLanguage.text("等宽", "Monospace"), "Menlo")] {
+            if NSFontManager.shared.availableFontFamilies.contains(family) || family == "system-ui" {
+                add(label, #selector(fontFromMenu(_:)), to: fontMenu, object: family)
+            }
+        }
+        fontMenu.addItem(.separator())
+        add(AppLanguage.text("更多字体…", "Show Fonts…"), #selector(chooseTextFont(_:)), to: fontMenu)
+        let fontItem = NSMenuItem(title: fontMenu.title, action: nil, keyEquivalent: "")
+        fontItem.submenu = fontMenu
+        menu.addItem(fontItem)
+        let sizes = NSMenu(title: AppLanguage.text("字号", "Font Size"))
+        for size in [10, 12, 14, 16, 18, 20, 24, 28, 36] {
+            add("\(size)", #selector(fontSizeFromMenu(_:)), to: sizes, object: size)
+        }
+        let sizeItem = NSMenuItem(title: sizes.title, action: nil, keyEquivalent: "")
+        sizeItem.submenu = sizes
+        menu.addItem(sizeItem)
+        if selectedRange().length > 0 {
+            menu.addItem(.separator())
+            add(AppLanguage.text("添加链接…", "Add Link…"), #selector(addLinkForSelection(_:)))
+            add(AppLanguage.text("添加提醒…", "Add Reminder…"), #selector(addReminderForSelection(_:)))
+        }
+        return menu
     }
+
+}
+
+extension MarkdownEditingTextView {
+    @objc private func addLinkForSelection(_ sender: Any?) {
+        guard let selected = captureStyleSelection(), let layoutManager, let textContainer else { return }
+        guard !selected.original.contains("\n"), !selected.original.contains("\r"),
+              !selected.original.contains("]") else {
+            let alert = NSAlert()
+            alert.messageText = AppLanguage.text("请选择单行文字", "Select text on one line")
+            alert.informativeText = AppLanguage.text("链接文字不能跨行或包含右方括号。", "Link text cannot contain a line break or a closing bracket.")
+            alert.runModal()
+            return
+        }
+        let source = selected.expected as NSString
+        let line = source.lineRange(for: selected.range)
+        let expression = try? NSRegularExpression(pattern: #"\[([^\]\n]+)\]\((https?://[^\s)]+|mailto:[^\s)]+)\)"#)
+        let existing = expression?.matches(in: selected.expected, range: line).first { $0.range(at: 1) == selected.range }
+        let replaceRange = existing?.range ?? selected.range
+        let initialURL = existing.map { source.substring(with: $0.range(at: 2)) } ?? ""
+        let popover = NSPopover()
+        let picker = LinkEditor(initialURL: initialURL, editing: existing != nil, save: { [weak self, weak popover] url in
+            guard let self, self.string == selected.expected,
+                  NSMaxRange(replaceRange) <= (self.string as NSString).length else { return }
+            let replacement = "[\(selected.original)](\(url))"
+            self.breakUndoCoalescing()
+            self.insertText(replacement, replacementRange: replaceRange)
+            self.breakUndoCoalescing()
+            self.setSelectedRange(NSRange(location: replaceRange.location + 1, length: (selected.original as NSString).length))
+            popover?.close()
+            self.window?.makeFirstResponder(self)
+        }, cancel: { [weak popover] in popover?.close() })
+        let controller = NSViewController()
+        controller.view = NSHostingView(rootView: LocalizedRoot { picker })
+        popover.contentViewController = controller
+        popover.contentSize = NSSize(width: 320, height: 146)
+        popover.behavior = .transient
+        linkPopover = popover
+        let glyph = layoutManager.glyphIndexForCharacter(at: selected.range.location)
+        let rect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer)
+            .offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+        popover.show(relativeTo: rect, of: self, preferredEdge: .maxY)
+    }
+
+}
+
+extension MarkdownEditingTextView {
+    @objc private func addReminderForSelection(_ sender: Any?) {
+        let selection = selectedRange()
+        guard selection.length > 0 else { return }
+        showReminderPicker(replacing: NSRange(location: NSMaxRange(selection), length: 0))
+    }
+
+    private func showReminderPicker(replacing range: NSRange, editing: Bool = false) {
+        guard let layoutManager, let textContainer, NSMaxRange(range) <= (string as NSString).length else { return }
+        let snapshot = string
+        let popover = NSPopover()
+        let original = (snapshot as NSString).substring(with: range)
+        let savedDate = editing ? ReminderScheduler.formatter().date(from: original.replacingOccurrences(of: "⏰", with: "").trimmingCharacters(in: .whitespaces)) : nil
+        let remove: (() -> Void)? = editing ? { [weak self, weak popover] in
+            guard let self, self.string == snapshot else { return }
+            self.insertText("", replacementRange: range)
+            popover?.close()
+            self.window?.makeFirstResponder(self)
+        } : nil
+        let view = ReminderPicker(date: savedDate ?? Date().addingTimeInterval(3600), save: { [weak self, weak popover] date in
+            guard let self else { return }
+            Task { @MainActor in
+                do {
+                    guard try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) else {
+                        let alert = NSAlert()
+                        alert.messageText = AppLanguage.text("请在系统设置中允许 Tico 通知", "Allow Tico notifications in System Settings")
+                        alert.runModal()
+                        return
+                    }
+                    let formatter = ReminderScheduler.formatter()
+                    let formatted = formatter.string(from: date)
+                    guard self.string == snapshot, let rounded = formatter.date(from: formatted), rounded > Date() else { return }
+                    let marker = (editing ? "⏰ " : " ⏰ ") + formatted
+                    self.insertText(marker, replacementRange: range)
+                    popover?.close()
+                    self.window?.makeFirstResponder(self)
+                } catch {
+                    let alert = NSAlert(error: error)
+                    alert.runModal()
+                }
+            }
+        }, remove: remove)
+        let controller = NSViewController()
+        controller.view = NSHostingView(rootView: LocalizedRoot { view })
+        popover.contentViewController = controller
+        popover.contentSize = NSSize(width: 280, height: 130)
+        popover.behavior = .transient
+        reminderPopover = popover
+        let glyph = layoutManager.glyphIndexForCharacter(at: max(0, min(range.location, max(0, (string as NSString).length - 1))))
+        let rect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: textContainer)
+            .offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+        popover.show(relativeTo: rect, of: self, preferredEdge: .maxY)
+    }
+
+}
+
+extension MarkdownEditingTextView {
+    private func focusWhenAttached() {
+        guard pendingFocus, window != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.pendingFocus, let window = self.window else { return }
+            if window.makeFirstResponder(self) {
+                self.setSelectedRange(NSRange(location: (self.string as NSString).length, length: 0))
+                self.pendingFocus = false
+                self.focusHandled?()
+                self.focusHandled = nil
+            }
+        }
+    }
+
+    func applyInlineFormat(_ format: MarkdownInlineFormat) {
+        guard !hasMarkedText() else { return }
+        let source = string as NSString
+        let selection = selectedRange()
+        guard selection.location != NSNotFound, NSMaxRange(selection) <= source.length else { return }
+        guard !hiddenTaskRanges.contains(where: { NSIntersectionRange(selection, $0).length > 0 }) else { NSSound.beep(); return }
+        var containsAttachment = false
+        if selection.length > 0 {
+            textStorage?.enumerateAttribute(.attachment, in: selection) { value, _, stop in
+                if value is InlineNoteAttachment { containsAttachment = true; stop.pointee = true }
+            }
+        }
+        guard !containsAttachment else { NSSound.beep(); return }
+        let marker = format.marker
+        let markerLength = (marker as NSString).length
+        let selectedText = source.substring(with: selection)
+        let replacement: String
+        let newSelection: NSRange
+        if selection.length >= markerLength * 2 && selectedText.hasPrefix(marker) && selectedText.hasSuffix(marker) {
+            let selected = selectedText as NSString
+            replacement = selected.substring(with: NSRange(location: markerLength, length: selected.length - markerLength * 2))
+            newSelection = NSRange(location: selection.location, length: (replacement as NSString).length)
+        } else if selection.location >= markerLength && NSMaxRange(selection) + markerLength <= source.length,
+                  source.substring(with: NSRange(location: selection.location - markerLength, length: markerLength)) == marker,
+                  source.substring(with: NSRange(location: NSMaxRange(selection), length: markerLength)) == marker {
+            let enclosing = NSRange(location: selection.location - markerLength, length: selection.length + markerLength * 2)
+            insertText(selectedText, replacementRange: enclosing)
+            setSelectedRange(NSRange(location: enclosing.location, length: selection.length))
+            window?.makeFirstResponder(self)
+            return
+        } else {
+            replacement = marker + selectedText + marker
+            newSelection = NSRange(location: selection.location + markerLength, length: selection.length)
+        }
+        insertText(replacement, replacementRange: selection)
+        setSelectedRange(newSelection)
+        window?.makeFirstResponder(self)
+    }
+
 }
