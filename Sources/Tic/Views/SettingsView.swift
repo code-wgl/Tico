@@ -176,7 +176,7 @@ struct SettingsView: View {
         Section {
             Picker(AppLanguage.text("默认颜色", "Default color"), selection: $newColor) {
                 Text(AppLanguage.text("随机", "Random")).tag("random")
-                ForEach(NoteColor.allCases) { color in Text(LocalizedStringKey(color.displayName)).tag(color.rawValue) }
+                ForEach(NoteColor.allCases) { color in Text(color.localizedName).tag(color.rawValue) }
             }
             Toggle(AppLanguage.text("毛玻璃背景", "Glass background"), isOn: $newGlass).toggleStyle(.switch)
             LabeledContent(AppLanguage.text("背景不透明度", "Background opacity")) {

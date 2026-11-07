@@ -20,6 +20,24 @@ enum NoteColor: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var displayName: String { rawValue.capitalized }
 
+    /// Explicitly resolve the selected app language, including in detached popovers.
+    var localizedName: String {
+        switch self {
+        case .yellow: AppLanguage.text("黄色", "Yellow")
+        case .pink: AppLanguage.text("粉色", "Pink")
+        case .blue: AppLanguage.text("蓝色", "Blue")
+        case .green: AppLanguage.text("绿色", "Green")
+        case .purple: AppLanguage.text("紫色", "Purple")
+        case .graphite: AppLanguage.text("石墨色", "Graphite")
+        case .orange: AppLanguage.text("橙色", "Orange")
+        case .coral: AppLanguage.text("珊瑚色", "Coral")
+        case .mint: AppLanguage.text("薄荷色", "Mint")
+        case .teal: AppLanguage.text("青绿色", "Teal")
+        case .cream: AppLanguage.text("奶油色", "Cream")
+        case .white: AppLanguage.text("白色", "White")
+        }
+    }
+
     // MARK: - Paper
 
     /// The note's paper fill (used for solid notes and as a faint tint behind glass).

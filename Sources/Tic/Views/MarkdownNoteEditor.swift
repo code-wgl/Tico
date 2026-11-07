@@ -3074,8 +3074,8 @@ extension MarkdownEditingTextView {
         colorItem.submenu = colors
         menu.addItem(colorItem)
         let fontMenu = NSMenu(title: AppLanguage.text("字体", "Font"))
-        for (label, family) in [(AppLanguage.text("系统字体", "System"), "system-ui"), ("苹方", "PingFang SC"),
-                                ("黑体", "Heiti SC"), ("宋体", "Songti SC"), ("Helvetica", "Helvetica"),
+        for (label, family) in [(AppLanguage.text("系统字体", "System"), "system-ui"), (AppLanguage.text("苹方", "PingFang SC"), "PingFang SC"),
+                                (AppLanguage.text("黑体", "Heiti SC"), "Heiti SC"), (AppLanguage.text("宋体", "Songti SC"), "Songti SC"), ("Helvetica", "Helvetica"),
                                 ("Georgia", "Georgia"), (AppLanguage.text("等宽", "Monospace"), "Menlo")] {
             if NSFontManager.shared.availableFontFamilies.contains(family) || family == "system-ui" {
                 add(label, #selector(fontFromMenu(_:)), to: fontMenu, object: family)

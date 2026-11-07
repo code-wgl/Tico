@@ -71,8 +71,9 @@ struct NoteHeaderView: View {
         .animation(.easeInOut(duration: 0.15), value: isRevealed)
         .animation(.easeInOut(duration: 0.15), value: controller.completedCount > 0)
         .confirmationDialog(
-            "Delete \(controller.completedCount) completed task\(controller.completedCount == 1 ? "" : "s")? "
-                + "This can't be undone.",
+            label("删除 \(controller.completedCount) 条已完成任务？此操作无法撤销。",
+                  "Delete \(controller.completedCount) completed task\(controller.completedCount == 1 ? "" : "s")? "
+                    + "This can't be undone."),
             isPresented: $showClearConfirm,
             titleVisibility: .visible
         ) {
@@ -87,15 +88,15 @@ struct NoteHeaderView: View {
 
     private func overflowMenu(shown: Set<ToolbarItem>) -> some View {
         Menu {
-            if !shown.contains(.newNote) { Button("New note") { controller.requestNewNote() } }
-            if !shown.contains(.addTask) { Button("Add task", action: onAddTask) }
+            if !shown.contains(.newNote) { Button(label("新建便签", "New note")) { controller.requestNewNote() } }
+            if !shown.contains(.addTask) { Button(label("添加任务", "Add task"), action: onAddTask) }
             if !shown.contains(.color) {
-                Menu("Note color") {
+                Menu(label("便签颜色", "Note color")) {
                     ForEach(NoteColor.allCases) { color in
-                        Button(LocalizedStringKey(color.displayName)) { controller.setColor(color) }
+                        Button(color.localizedName) { controller.setColor(color) }
                     }
                     Divider()
-                    Button(LocalizedStringKey(note.material == .glass ? "Switch to solid" : "Switch to glass")) { controller.toggleMaterial() }
+                    Button(note.material == .glass ? label("切换为纯色", "Switch to solid") : label("切换为玻璃效果", "Switch to glass")) { controller.toggleMaterial() }
                     Menu(label("不透明度", "Opacity")) {
                         ForEach([30, 50, 70, 85, 100], id: \.self) { value in
                             Button("\(value)%") { controller.setBackgroundOpacity(Double(value) / 100) }
@@ -104,17 +105,17 @@ struct NoteHeaderView: View {
                 }
             }
             if !shown.contains(.completed) {
-                Toggle("Hide completed", isOn: Binding(
+                Toggle(label("隐藏已完成任务", "Hide completed"), isOn: Binding(
                     get: { note.hideCompleted }, set: { _ in controller.toggleHideCompleted() }
                 ))
-                Toggle("Move completed to bottom", isOn: Binding(
+                Toggle(label("已完成任务移到底部", "Move completed to bottom"), isOn: Binding(
                     get: { note.moveCompletedToBottom }, set: { _ in controller.toggleMoveCompletedToBottom() }
                 ))
             }
             if controller.completedCount > 0 && !shown.contains(.clear) {
-                Button("Clean up completed tasks") { showClearConfirm = true }
+                Button(label("清理已完成任务", "Clean up completed tasks")) { showClearConfirm = true }
             }
-            if !shown.contains(.collapse) { Button("Collapse") { controller.toggleCollapsed() } }
+            if !shown.contains(.collapse) { Button(label("收起便签", "Collapse")) { controller.toggleCollapsed() } }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 13, weight: .semibold))
@@ -167,7 +168,7 @@ struct NoteHeaderView: View {
                             )
                     }
                     .buttonStyle(.plain)
-                    .help(LocalizedStringKey(swatch.displayName))
+                    .help(swatch.localizedName)
                 }
             }
             Divider()
@@ -214,11 +215,11 @@ struct NoteHeaderView: View {
     /// controller's toggle method (the binding's incoming value is ignored — the method flips + persists).
     private var completedOptionsMenu: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Toggle("Hide completed", isOn: Binding(
+            Toggle(label("隐藏已完成任务", "Hide completed"), isOn: Binding(
                 get: { note.hideCompleted },
                 set: { _ in controller.toggleHideCompleted() }
             ))
-            Toggle("Move completed to bottom", isOn: Binding(
+            Toggle(label("已完成任务移到底部", "Move completed to bottom"), isOn: Binding(
                 get: { note.moveCompletedToBottom },
                 set: { _ in controller.toggleMoveCompletedToBottom() }
             ))

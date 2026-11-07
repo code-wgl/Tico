@@ -45,7 +45,9 @@ struct ListsSearchView: View {
             Button("Delete Note", role: .destructive) { model.delete(note); noteToDelete = nil }
             Button("Cancel", role: .cancel) { noteToDelete = nil }
         } message: { note in
-            Text("“\(note.title.isEmpty ? "Untitled Note" : note.title)” and all its tasks will be permanently deleted. This cannot be undone.")
+            let title = note.title.isEmpty ? AppLanguage.text("无标题便签", "Untitled Note") : note.title
+            Text(AppLanguage.text("“\(title)”及其所有任务将被永久删除，此操作无法撤销。",
+                                  "“\(title)” and all its tasks will be permanently deleted. This cannot be undone."))
         }
     }
 

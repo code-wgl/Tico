@@ -21,7 +21,7 @@ enum NotePortableFormat {
                 let parts = task.text.components(separatedBy: "\n")
                 var line = String(repeating: "  ", count: level) + (task.isDone ? "- [x] " : "- [ ] ") + (parts.first ?? "")
                 if let image = taskImages[task.id] {
-                    line += format == .markdown ? " ![image](\(try imageURL(image)))" : " [图片]"
+                    line += format == .markdown ? " ![image](\(try imageURL(image)))" : " " + AppLanguage.text("[图片]", "[Image]")
                 }
                 for continuation in parts.dropFirst() {
                     line += "\n" + String(repeating: "  ", count: level + 2) + continuation
@@ -36,7 +36,8 @@ enum NotePortableFormat {
             markdown = markingHiddenTasks(in: markdown)
         }
         if format == .text {
-            markdown = markdown.replacingOccurrences(of: #"!\[[^\]\n]*\]\(tic-omitted-image\)"#, with: "[图片]", options: .regularExpression)
+            markdown = markdown.replacingOccurrences(of: #"!\[[^\]\n]*\]\(tic-omitted-image\)"#,
+                with: AppLanguage.text("[图片]", "[Image]"), options: .regularExpression)
             // Text exports keep the words without exposing the editor's HTML style markup.
             let spanPattern = #"<span style=\"(?:color:(?:#[0-9a-fA-F]{6}|inherit)|"#
                 + #"font-family:[^\"<>;]+(?:;font-size:[0-9]{1,3}px)?"#
