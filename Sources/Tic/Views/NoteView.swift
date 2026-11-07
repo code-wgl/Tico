@@ -136,6 +136,11 @@ struct NoteView: View {
         }
     }
 
+}
+
+// MARK: - Note content and task presentation
+
+extension NoteView {
     // MARK: - Collapsed bar
 
     private var collapsedBar: some View {

@@ -387,39 +387,8 @@ struct MarkdownNoteEditor: NSViewRepresentable {
             let reminderRegex = try? NSRegularExpression(pattern: #"⏰\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2}"#)
             source.enumerateSubstrings(in: full, options: .byLines) { line, range, _, _ in
                 guard let line else { return }
-                if fence.consume(line) {
-                    codeFenceRanges.append(range)
-                    let paragraph = NSMutableParagraphStyle()
-                    paragraph.firstLineHeadIndent = 10
-                    paragraph.headIndent = 10
-                    paragraph.tailIndent = -10
-                    if fence.isInside { paragraph.paragraphSpacingBefore = 12 }
-                    else { paragraph.paragraphSpacing = 12 }
-                    storage.addAttribute(.paragraphStyle, value: paragraph, range: source.paragraphRange(for: range))
-                    storage.addAttributes([.font: NSFont.monospacedSystemFont(ofSize: bodyFont.pointSize, weight: .regular),
-                                           .foregroundColor: NSColor.secondaryLabelColor], range: range)
-                    if let editor = view as? MarkdownEditingTextView, !editor.isEditingSeparator(range) {
-                        let text = line as NSString
-                        var start = 0
-                        while start < text.length && text.character(at: start) == 32 { start += 1 }
-                        if start < text.length {
-                            let delimiter = text.character(at: start)
-                            var end = start
-                            while end < text.length && text.character(at: end) == delimiter { end += 1 }
-                            self.hideMarker(NSRange(location: range.location + start, length: end - start), in: storage)
-                        }
-                    }
-                    return
-                }
-                if fence.isInside {
-                    let paragraph = NSMutableParagraphStyle()
-                    paragraph.firstLineHeadIndent = 10
-                    paragraph.headIndent = 10
-                    paragraph.tailIndent = -10
-                    storage.addAttribute(.paragraphStyle, value: paragraph, range: source.paragraphRange(for: range))
-                    storage.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: bodyFont.pointSize, weight: .regular), range: range)
-                    return
-                }
+                if self.styleCodeLine(line, range: range, fence: &fence, fenceRanges: &codeFenceRanges,
+                                      storage: storage, source: source, view: view, bodyFont: bodyFont) { return }
                 if let regex = reminderRegex {
                     for match in regex.matches(in: line, range: NSRange(location: 0, length: (line as NSString).length)) {
                         reminderRanges.append(NSRange(location: range.location + match.range.location, length: match.range.length))
@@ -511,30 +480,7 @@ struct MarkdownNoteEditor: NSViewRepresentable {
                     }
                     return
                 }
-                let hashes = line.prefix(while: { $0 == "#" }).count
-                if (1...6).contains(hashes), line.dropFirst(hashes).first == " " {
-                    let size: CGFloat = hashes == 1 ? 20 : hashes == 2 ? 17 : 15
-                    storage.addAttribute(.font, value: NSFont.systemFont(ofSize: size, weight: .semibold), range: range)
-                    if hashes == 1 {
-                        let paragraph = NSMutableParagraphStyle()
-                        paragraph.paragraphSpacingBefore = 5
-                        paragraph.paragraphSpacing = 7
-                        storage.addAttribute(.paragraphStyle, value: paragraph,
-                                             range: source.paragraphRange(for: range))
-                    }
-                    if (line as NSString).length > hashes + 1 {
-                        self.hideMarker(NSRange(location: range.location, length: hashes + 1), in: storage)
-                    }
-                } else if line.hasPrefix("> ") {
-                    quoteRanges.append(range)
-                    storage.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: range)
-                    let paragraph = NSMutableParagraphStyle()
-                    paragraph.firstLineHeadIndent = 12
-                    paragraph.headIndent = 12
-                    paragraph.lineSpacing = 2
-                    storage.addAttribute(.paragraphStyle, value: paragraph, range: source.paragraphRange(for: range))
-                    if (line as NSString).length > 2 { self.hideMarker(NSRange(location: range.location, length: 2), in: storage) }
-                }
+                self.styleHeadingOrQuote(line, range: range, quoteRanges: &quoteRanges, storage: storage, source: source)
                 self.applyInlineStyles(to: storage, source: source, range: range, bodyFont: bodyFont)
             }
             self.applyTableStyles(to: storage, source: source, bodyFont: bodyFont, view: view, visuals: &tableVisuals)
@@ -570,6 +516,69 @@ struct MarkdownNoteEditor: NSViewRepresentable {
                 editor.needsDisplay = true
             }
             view.typingAttributes = [.font: bodyFont, .foregroundColor: NSColor(parent.textColor)]
+        }
+
+        /// Styles code blocks and returns whether the line was fully handled.
+        private func styleCodeLine(_ line: String, range: NSRange, fence: inout MarkdownFenceScanner,
+                                   fenceRanges: inout [NSRange], storage: NSTextStorage, source: NSString,
+                                   view: NSTextView, bodyFont: NSFont) -> Bool {
+            let isFence = fence.consume(line)
+            guard isFence || fence.isInside else { return false }
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.firstLineHeadIndent = 10
+            paragraph.headIndent = 10
+            paragraph.tailIndent = -10
+            if isFence {
+                fenceRanges.append(range)
+                if fence.isInside { paragraph.paragraphSpacingBefore = 12 }
+                else { paragraph.paragraphSpacing = 12 }
+            }
+            storage.addAttribute(.paragraphStyle, value: paragraph, range: source.paragraphRange(for: range))
+            let font = NSFont.monospacedSystemFont(ofSize: bodyFont.pointSize, weight: .regular)
+            if isFence {
+                storage.addAttributes([.font: font, .foregroundColor: NSColor.secondaryLabelColor], range: range)
+                if let editor = view as? MarkdownEditingTextView, !editor.isEditingSeparator(range) {
+                    let text = line as NSString
+                    var start = 0
+                    while start < text.length && text.character(at: start) == 32 { start += 1 }
+                    if start < text.length {
+                        let delimiter = text.character(at: start)
+                        var end = start
+                        while end < text.length && text.character(at: end) == delimiter { end += 1 }
+                        hideMarker(NSRange(location: range.location + start, length: end - start), in: storage)
+                    }
+                }
+            } else {
+                storage.addAttribute(.font, value: font, range: range)
+            }
+            return true
+        }
+
+        private func styleHeadingOrQuote(_ line: String, range: NSRange, quoteRanges: inout [NSRange],
+                                         storage: NSTextStorage, source: NSString) {
+            let hashes = line.prefix(while: { $0 == "#" }).count
+            if (1...6).contains(hashes), line.dropFirst(hashes).first == " " {
+                let size: CGFloat = hashes == 1 ? 20 : hashes == 2 ? 17 : 15
+                storage.addAttribute(.font, value: NSFont.systemFont(ofSize: size, weight: .semibold), range: range)
+                if hashes == 1 {
+                    let paragraph = NSMutableParagraphStyle()
+                    paragraph.paragraphSpacingBefore = 5
+                    paragraph.paragraphSpacing = 7
+                    storage.addAttribute(.paragraphStyle, value: paragraph, range: source.paragraphRange(for: range))
+                }
+                if (line as NSString).length > hashes + 1 {
+                    hideMarker(NSRange(location: range.location, length: hashes + 1), in: storage)
+                }
+            } else if line.hasPrefix("> ") {
+                quoteRanges.append(range)
+                storage.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: range)
+                let paragraph = NSMutableParagraphStyle()
+                paragraph.firstLineHeadIndent = 12
+                paragraph.headIndent = 12
+                paragraph.lineSpacing = 2
+                storage.addAttribute(.paragraphStyle, value: paragraph, range: source.paragraphRange(for: range))
+                if (line as NSString).length > 2 { hideMarker(NSRange(location: range.location, length: 2), in: storage) }
+            }
         }
 
         private func hideMarker(_ range: NSRange, in storage: NSTextStorage) {
@@ -616,15 +625,7 @@ struct MarkdownNoteEditor: NSViewRepresentable {
                 for rowIndex in first...end {
                     let row = lines[rowIndex]
                     let text = source.substring(with: row) as NSString
-                    var pipes: [Int] = []
-                    var escaped = false
-                    var codeRun = 0
-                    for i in 0..<text.length {
-                        let char = text.character(at: i)
-                        if char == 96 && !escaped { codeRun = codeRun == 0 ? 1 : 0 }
-                        if char == 124 && !escaped && codeRun == 0 { pipes.append(i) }
-                        if char == 92 { escaped.toggle() } else { escaped = false }
-                    }
+                    let pipes = tablePipes(in: text)
                     var edges = [-1] + pipes + [text.length]
                     if pipes.first == 0 { edges.removeFirst() }
                     if pipes.last == text.length - 1 { edges.removeLast() }
@@ -684,6 +685,20 @@ struct MarkdownNoteEditor: NSViewRepresentable {
                 visuals.append(MarkdownTableVisual(rows: rows.map(\.range), columnWidths: Array(repeating: columnWidth, count: columns),
                                                    allRows: allRows, cells: allCells, sticky: stickyMarker != nil, stickyMarker: stickyMarker))
             }
+        }
+
+        /// Find separators outside escaped sequences and inline code.
+        private func tablePipes(in text: NSString) -> [Int] {
+            var pipes: [Int] = []
+            var escaped = false
+            var codeRun = 0
+            for i in 0..<text.length {
+                let char = text.character(at: i)
+                if char == 96 && !escaped { codeRun = codeRun == 0 ? 1 : 0 }
+                if char == 124 && !escaped && codeRun == 0 { pipes.append(i) }
+                if char == 92 { escaped.toggle() } else { escaped = false }
+            }
+            return pipes
         }
 
         /// HTML spans keep colour and font choices in the Markdown source across restarts/export.
@@ -1296,6 +1311,16 @@ final class MarkdownEditingTextView: NSTextView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        drawBackgrounds(in: dirtyRect)
+        super.draw(dirtyRect)
+        guard let layoutManager, let textContainer else { return }
+        drawOrderedMarkersAndQuotes(in: dirtyRect, layoutManager: layoutManager, textContainer: textContainer)
+        drawTableGrid(in: dirtyRect)
+        drawTaskMarkers(in: dirtyRect, layoutManager: layoutManager, textContainer: textContainer)
+        drawStickyHeaders(in: dirtyRect)
+    }
+
+    private func drawBackgrounds(in dirtyRect: NSRect) {
         for table in tableVisuals {
             guard let geometry = tableGeometry(table), geometry.rect.intersects(dirtyRect) else { continue }
             taskColor.withAlphaComponent(0.035).setFill()
@@ -1328,8 +1353,9 @@ final class MarkdownEditingTextView: NSTextView {
                 NSBezierPath(roundedRect: rect.insetBy(dx: -3, dy: -1), xRadius: 5, yRadius: 5).fill()
             }
         }
-        super.draw(dirtyRect)
-        guard let layoutManager, let textContainer else { return }
+    }
+
+    private func drawOrderedMarkersAndQuotes(in dirtyRect: NSRect, layoutManager: NSLayoutManager, textContainer: NSTextContainer) {
         let displayedOrderedMarkers = hasMarkedText() ? orderedListMarkers(in: string as NSString) : orderedMarkers
         let listFont = NSFont.preferredFont(forTextStyle: .body)
         for marker in displayedOrderedMarkers {
@@ -1360,6 +1386,9 @@ final class MarkdownEditingTextView: NSTextView {
                 NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1).fill()
             }
         }
+    }
+
+    private func drawTableGrid(in dirtyRect: NSRect) {
         for table in tableVisuals {
             guard let geometry = tableGeometry(table), geometry.rect.intersects(dirtyRect) else { continue }
             taskColor.withAlphaComponent(0.23).setStroke()
@@ -1402,6 +1431,9 @@ final class MarkdownEditingTextView: NSTextView {
             plus.line(to: NSPoint(x: handle.center.x, y: handle.center.y + 3))
             plus.stroke()
         }
+    }
+
+    private func drawTaskMarkers(in dirtyRect: NSRect, layoutManager: NSLayoutManager, textContainer: NSTextContainer) {
         for range in bulletsForDrawing() {
             guard let rect = taskMarkerRect(range), rect.intersects(dirtyRect) else { continue }
             let side: CGFloat = 4
@@ -1468,6 +1500,9 @@ final class MarkdownEditingTextView: NSTextView {
                 .foregroundColor: taskColor
             ])
         }
+    }
+
+    private func drawStickyHeaders(in dirtyRect: NSRect) {
         for table in tableVisuals {
             guard let rect = stickyHeaderRect(table), rect.intersects(dirtyRect), let cells = table.cells.first else { continue }
             (tablePaperColor.blended(withFraction: 0.08, of: taskColor) ?? tablePaperColor).setFill()
@@ -2022,6 +2057,18 @@ final class MarkdownEditingTextView: NSTextView {
         return tableVisuals.first { $0.allRows.contains(where: { $0.location == start }) }
     }
 
+    private func toggleStickyTable(_ table: MarkdownTableVisual, first: NSRange, location: Int) {
+        if let marker = table.stickyMarker {
+            insertText("", replacementRange: marker)
+            setSelectedRange(NSRange(location: max(0, location - marker.length), length: 0))
+        } else {
+            let marker = stickyTableMarker + "\n\n"
+            insertText(marker, replacementRange: NSRange(location: first.location, length: 0))
+            setSelectedRange(NSRange(location: location + (marker as NSString).length, length: 0))
+        }
+        breakUndoCoalescing()
+    }
+
     @objc private func tableActionFromMenu(_ sender: NSMenuItem) {
         guard !hasMarkedText(), let action = sender.representedObject as? String,
               let location = tableMenuLocation, let table = tableAt(location: location),
@@ -2039,15 +2086,7 @@ final class MarkdownEditingTextView: NSTextView {
         guard !hasAttachment else { NSSound.beep(); return }
         breakUndoCoalescing()
         if action == "sticky" {
-            if let marker = table.stickyMarker {
-                insertText("", replacementRange: marker)
-                setSelectedRange(NSRange(location: max(0, location - marker.length), length: 0))
-            } else {
-                let marker = stickyTableMarker + "\n\n"
-                insertText(marker, replacementRange: NSRange(location: first.location, length: 0))
-                setSelectedRange(NSRange(location: location + (marker as NSString).length, length: 0))
-            }
-            breakUndoCoalescing()
+            toggleStickyTable(table, first: first, location: location)
             return
         }
         let count = table.columnWidths.count
