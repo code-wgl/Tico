@@ -59,7 +59,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: macos-15-intel
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
       - uses: maxim-lobanov/setup-xcode@v1

@@ -24,6 +24,11 @@ final class NoteController {
     private(set) var imageCrops: [UUID: CGRect] = [:]
     /// Downsampled, uncropped bitmaps for drawing images on the note, loaded lazily per task.
     private(set) var thumbnails: [UUID: CGImage] = [:]
+    /// An image pasted into the quick-add, waiting with any typed text until Return adds the task.
+    private(set) var pendingImage: Data?
+    private(set) var pendingThumbnail: CGImage?
+    /// Bumped to ask the quick-add field to take the keyboard.
+    private(set) var quickAddFocusRequest = 0
 
     @ObservationIgnored private let db: AppDatabase
     @ObservationIgnored private var observation: Task<Void, Never>?
@@ -240,7 +245,11 @@ final class NoteController {
             catch { NSLog("[Tic] markdown save failed: \(error)") }
         }
     }
+}
 
+// MARK: - Tasks and task images
+
+extension NoteController {
     /// Adds a task at the end. `level` is the requested nesting depth (from the quick-add field's
     /// pending indent); it's clamped to what the previous row allows so the outline stays valid.
     /// With `imageData` (a paste) the task carries that image, and its text may be empty.
@@ -260,13 +269,6 @@ final class NoteController {
     }
 
     // MARK: - Quick-add image
-
-    /// An image pasted into the quick-add, waiting there (with whatever gets typed) until Return adds the
-    /// task. A draft only — never persisted.
-    private(set) var pendingImage: Data?
-    private(set) var pendingThumbnail: CGImage?
-    /// Bumped to ask the quick-add field to take the keyboard (e.g. a paste with nothing focused).
-    private(set) var quickAddFocusRequest = 0
 
     /// Holds a pasted image in the quick-add, replacing any already waiting, and focuses the field.
     func stageImage(_ data: Data) {
