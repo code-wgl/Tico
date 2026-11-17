@@ -145,6 +145,10 @@ struct MarkdownNoteEditor: NSViewRepresentable {
     /// Changing segments invalidates this editor's undo history even when two pages look identical.
     var segmentGeneration = 0
     var isSegmented = false
+    var usesPaging = false
+    var segmentSelection: NSRange?
+    var reflowRequest = 0
+    var onLargeSegment: (NSRange) -> Void = { _ in }
     var onMarkedTextChange: (Bool) -> Void = { _ in }
     var onFocusHandled: () -> Void = {}
     var onAddTask: () -> Void = {}
@@ -198,7 +202,7 @@ struct MarkdownNoteEditor: NSViewRepresentable {
         }
         view.setMarkdownSource(text, images: inlineImages)
         scroll.documentView = view
-        context.coordinator.applyStyle(to: view)
+        if !context.coordinator.requestReflowIfNeeded(view) { context.coordinator.applyStyle(to: view) }
         scroll.reportContentHeight()
         context.coordinator.focusIfRequested(view)
         context.coordinator.insertTaskIfRequested(view)
@@ -210,6 +214,7 @@ struct MarkdownNoteEditor: NSViewRepresentable {
         context.coordinator.parent = self
         styleNoteScroller(scroll, color: textColor)
         guard let view = scroll.documentView as? MarkdownEditingTextView else { return }
+        let segmentChanged = context.coordinator.lastSegmentGeneration != segmentGeneration
         context.coordinator.prepareSegment(view, generation: segmentGeneration)
         let startSeparating = separateCompletedTasks && !view.separateCompletedTasks
         view.separateCompletedTasks = separateCompletedTasks
@@ -230,10 +235,12 @@ struct MarkdownNoteEditor: NSViewRepresentable {
             let selection = view.sourceSelection()
             let adjusted = MarkdownEditingTextView.adjustSelection(selection, from: current, to: text)
             view.setMarkdownSource(text, images: inlineImages)
-            view.setSourceSelection(adjusted)
+            view.setSourceSelection(segmentChanged ? (segmentSelection ?? adjusted) : adjusted)
             context.coordinator.lastCommittedSource = text
+        } else if segmentChanged, let selection = segmentSelection {
+            view.setSourceSelection(selection)
         }
-        context.coordinator.applyStyle(to: view)
+        if !context.coordinator.requestReflowIfNeeded(view) { context.coordinator.applyStyle(to: view) }
         (scroll as? MarkdownEditorScrollView)?.reportContentHeight()
         context.coordinator.focusIfRequested(view)
         context.coordinator.insertTaskIfRequested(view)
@@ -259,6 +266,7 @@ extension MarkdownNoteEditor {
         var lastFocusRequest = 0
         var lastTaskInsertRequest = 0
         var lastSegmentGeneration: Int
+        private var reflowScheduled = false
         var lastCommittedSource: String
         var pendingExternal: (base: String, target: String)?
         private var taskCaretAdjustmentScheduled = false
@@ -273,6 +281,22 @@ extension MarkdownNoteEditor {
             guard lastSegmentGeneration != generation else { return }
             view.undoManager?.removeAllActions()
             lastSegmentGeneration = generation
+        }
+
+        /// Defer until AppKit finishes updating its caret and the binding contains the full edit.
+        @discardableResult
+        func requestReflowIfNeeded(_ view: MarkdownEditingTextView) -> Bool {
+            guard parent.usesPaging, !view.hasMarkedText(),
+                  (view.markdownSource() as NSString).length > ClipboardMarkdownPages.pageSize * 2 else { return false }
+            guard !reflowScheduled else { return true }
+            reflowScheduled = true
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self else { return }
+                self.reflowScheduled = false
+                guard let view, !view.hasMarkedText() else { return }
+                self.parent.onLargeSegment(view.sourceSelection())
+            }
+            return true
         }
 
         func focusIfRequested(_ view: MarkdownEditingTextView) {
@@ -308,7 +332,7 @@ extension MarkdownNoteEditor {
             }
             lastCommittedSource = source
             parent.text = source
-            applyStyle(to: view)
+            if !requestReflowIfNeeded(view) { applyStyle(to: view) }
             (view.enclosingScrollView as? MarkdownEditorScrollView)?.reportContentHeight()
             view.scheduleSlashMenuUpdate()
             if sortAfterEdit && view.separateCompletedTasks {
@@ -361,6 +385,7 @@ extension MarkdownNoteEditor {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let view = notification.object as? MarkdownEditingTextView else { return }
+            if requestReflowIfNeeded(view) { return }
             view.synchronizeTaskRangesIfNeeded()
             // Marker characters are visually replaced by a circle. A caret inside them would
             // appear on top of the circle, so snap it to the beginning of the task text.

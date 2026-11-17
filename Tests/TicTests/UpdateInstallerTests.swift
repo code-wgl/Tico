@@ -15,6 +15,52 @@ struct UpdateInstallerTests {
         #expect(UpdateInstaller.assetURL("Tico.zip.sha256", version: "1.2.3").absoluteString
                 == "https://github.com/code-wgl/Tico/releases/download/v1.2.3/Tico.zip.sha256")
     }
+
+    @Test("reads thin and universal Mach-O headers without developer tools")
+    func executableArchitecture() {
+        let intel: UInt32 = 0x01000007
+        let arm: UInt32 = 0x0100000c
+        func little(_ value: UInt32) -> [UInt8] { (0..<4).map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) } }
+        func big(_ value: UInt32) -> [UInt8] { little(value).reversed() }
+        func thin(_ cpu: UInt32, subtype: UInt32) -> [UInt8] {
+            [0xcf, 0xfa, 0xed, 0xfe] + little(cpu) + little(subtype) + little(2) + Array(repeating: 0, count: 16)
+        }
+        let intelSlice = thin(intel, subtype: 3)
+        let armSlice = thin(arm, subtype: 0)
+        let universal = Data(big(0xcafebabe) + big(2)
+                             + big(intel) + big(3) + big(48) + big(32) + big(0)
+                             + big(arm) + big(0) + big(80) + big(32) + big(0)
+                             + intelSlice + armSlice)
+        let fat64 = Data(big(0xcafebabf) + big(1)
+                         + big(intel) + big(3) + big(0) + big(40) + big(0) + big(32) + big(0) + big(0)
+                         + intelSlice)
+        let swappedFat = Data(little(0xcafebabe) + little(1)
+                              + little(arm) + little(0) + little(28) + little(32) + little(0) + armSlice)
+        #expect(UpdateInstaller.supportsMachO(Data(intelSlice), cpuType: intel))
+        #expect(!UpdateInstaller.supportsMachO(Data(intelSlice), cpuType: arm))
+        #expect(UpdateInstaller.supportsMachO(universal, cpuType: intel))
+        #expect(UpdateInstaller.supportsMachO(universal, cpuType: arm))
+        #expect(UpdateInstaller.supportsMachO(fat64, cpuType: intel))
+        #expect(UpdateInstaller.supportsMachO(swappedFat, cpuType: arm))
+        #expect(!UpdateInstaller.supportsMachO(Data(universal.prefix(60)), cpuType: arm))
+        #expect(!UpdateInstaller.supportsMachO(Data(thin(arm, subtype: 2)), cpuType: arm))
+        #expect(!UpdateInstaller.supportsMachO(Data("#!/bin/sh".utf8), cpuType: intel))
+        var notExecutable = intelSlice
+        notExecutable[12] = 6 // MH_DYLIB
+        #expect(!UpdateInstaller.supportsMachO(Data(notExecutable), cpuType: intel))
+    }
+
+    @Test("recognizes the architecture of the running test executable")
+    func runningExecutableArchitecture() throws {
+        let executable = try #require(Bundle.main.executableURL)
+        let data = try Data(contentsOf: executable, options: .mappedIfSafe)
+        #if arch(arm64)
+        let cpu: UInt32 = 0x0100000c
+        #else
+        let cpu: UInt32 = 0x01000007
+        #endif
+        #expect(UpdateInstaller.supportsMachO(data, cpuType: cpu))
+    }
     private struct Fixture {
         let folder: URL
         var installed: URL { folder.appendingPathComponent("Tico.app") }
@@ -30,12 +76,13 @@ struct UpdateInstallerTests {
     }
 
     /// A minimal, ad-hoc-signed bundle: Info.plist + a shell-script executable.
-    private func makeApp(at app: URL, id: String = "com.kasvith.tic", version: String, tamper: Bool = false) throws {
+    private func makeApp(at app: URL, id: String = "com.kasvith.tic", version: String, minimum: String = "14.0", tamper: Bool = false) throws {
         let macOS = app.appendingPathComponent("Contents/MacOS")
         try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
         let info: NSDictionary = [
             "CFBundleIdentifier": id, "CFBundleExecutable": "Tic",
             "CFBundleShortVersionString": version, "CFBundlePackageType": "APPL",
+            "LSMinimumSystemVersion": minimum,
         ]
         try info.write(to: app.appendingPathComponent("Contents/Info.plist"))
         let executable = macOS.appendingPathComponent("Tic")
@@ -46,10 +93,10 @@ struct UpdateInstallerTests {
     }
 
     /// A release: `Tico.zip` of a fresh bundle plus its `Tico.zip.sha256` (or a wrong one).
-    private func makeRelease(id: String = "com.kasvith.tic", version: String, tamper: Bool = false, badChecksum: Bool = false) throws -> UpdateInstaller {
+    private func makeRelease(id: String = "com.kasvith.tic", version: String, minimum: String = "14.0", tamper: Bool = false, badChecksum: Bool = false, supportedArchitecture: Bool = true) throws -> UpdateInstaller {
         let build = FileManager.default.temporaryDirectory.appendingPathComponent("UpdateInstallerBuild-\(UUID().uuidString)")
         let app = build.appendingPathComponent("Tico.app")
-        try makeApp(at: app, id: id, version: version, tamper: tamper)
+        try makeApp(at: app, id: id, version: version, minimum: minimum, tamper: tamper)
         let zipURL = build.appendingPathComponent("Tico.zip")
         try run("/usr/bin/ditto", "-c", "-k", "--keepParent", app.path, zipURL.path)
         let zip = try Data(contentsOf: zipURL)
@@ -57,7 +104,7 @@ struct UpdateInstallerTests {
         let checksum = Data("\(hash)  Tico.zip\n".utf8)
         return UpdateInstaller(download: { url in
             url.lastPathComponent == "Tico.zip.sha256" ? checksum : zip
-        })
+        }, supportsArchitecture: { _ in supportedArchitecture })
     }
 
     private func run(_ tool: String, _ arguments: String...) throws {
@@ -89,6 +136,55 @@ struct UpdateInstallerTests {
             try await makeRelease(version: "0.9.0", badChecksum: true).install(version: "0.9.0", replacing: fixture.installed)
         }
         #expect(installedVersion(fixture) == "0.8.0")
+    }
+
+    @Test("rejects an update requiring a newer OS without replacing the installed app")
+    func unsupportedSystem() async throws {
+        let fixture = try makeFixture()
+        await #expect(throws: UpdateInstaller.Failure.incompatibleSystem("999.0")) {
+            try await makeRelease(version: "0.9.0", minimum: "999.0").install(version: "0.9.0", replacing: fixture.installed)
+        }
+        #expect(installedVersion(fixture) == "0.8.0")
+    }
+
+    @Test("rejects an update for a different architecture without replacing the installed app")
+    func unsupportedArchitecture() async throws {
+        let fixture = try makeFixture()
+        await #expect(throws: UpdateInstaller.Failure.incompatibleArchitecture) {
+            try await makeRelease(version: "0.9.0", supportedArchitecture: false).install(version: "0.9.0", replacing: fixture.installed)
+        }
+        #expect(installedVersion(fixture) == "0.8.0")
+    }
+
+    @Test("a failure preparing to swap leaves the existing app in place")
+    func preparationFailure() async throws {
+        struct Interrupted: Error {}
+        let fixture = try makeFixture()
+        var installer = try makeRelease(version: "0.9.0")
+        installer.beforeSwap = { throw Interrupted() }
+        await #expect(throws: Interrupted.self) {
+            try await installer.install(version: "0.9.0", replacing: fixture.installed)
+        }
+        #expect(installedVersion(fixture) == "0.8.0")
+    }
+
+    @Test("a failed atomic exchange leaves the existing app in place")
+    func atomicExchangeFailure() async throws {
+        let fixture = try makeFixture()
+        var installer = try makeRelease(version: "0.9.0")
+        installer.atomicSwap = { _, _ in false }
+        await #expect(throws: UpdateInstaller.Failure.swapFailed) {
+            try await installer.install(version: "0.9.0", replacing: fixture.installed)
+        }
+        #expect(installedVersion(fixture) == "0.8.0")
+    }
+
+    @Test("minimum version is compared numerically and invalid metadata is rejected")
+    func minimumSystemVersion() {
+        let current = OperatingSystemVersion(majorVersion: 14, minorVersion: 4, patchVersion: 1)
+        #expect(UpdateInstaller.supportsSystemVersion("14.4", current: current))
+        #expect(!UpdateInstaller.supportsSystemVersion("14.10", current: current))
+        #expect(!UpdateInstaller.supportsSystemVersion("invalid", current: current))
     }
 
     @Test("a download that isn't Tic is refused")

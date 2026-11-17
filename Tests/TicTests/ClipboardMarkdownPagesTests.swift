@@ -35,6 +35,73 @@ struct ClipboardMarkdownPagesTests {
         #expect(NSMaxRange(previous) == second.location)
     }
 
+    @Test("image references crossing a boundary stay intact in both directions")
+    func imageReferenceAtBoundary() throws {
+        let marker = "![image](tic-image://12345678-1234-1234-1234-123456789ABC)"
+        let text = "# Clipboard\n" + String(repeating: "a", count: 11_980) + marker + String(repeating: "b", count: 15_000)
+        let source = text as NSString
+        let first = try #require(ClipboardMarkdownPages.first(in: text))
+        let second = ClipboardMarkdownPages.next(in: text, from: NSMaxRange(first))
+        #expect(NSMaxRange(first) == source.range(of: marker).location)
+        #expect(source.substring(with: second).contains(marker))
+        let previous = ClipboardMarkdownPages.previous(in: text, before: NSMaxRange(second))
+        #expect(source.substring(with: previous).contains(marker))
+    }
+
+    @Test("long image references up to the limit remain intact and paging stays bounded")
+    func longImageReference() throws {
+        let marker = "![" + String(repeating: "x", count: 23_900) + "](tic-image://ABCD-1234)"
+        let text = "# Clipboard\n" + marker + String(repeating: "b", count: 30_000)
+        let source = text as NSString
+        let first = try #require(ClipboardMarkdownPages.first(in: text))
+        let second = ClipboardMarkdownPages.next(in: text, from: NSMaxRange(first))
+        #expect(source.substring(with: second).contains(marker))
+        #expect(second.length <= ClipboardMarkdownPages.maximumProtectedImageReferenceLength)
+        let previous = ClipboardMarkdownPages.previous(in: text, before: NSMaxRange(second))
+        #expect(source.substring(with: previous).contains(marker))
+    }
+
+    @Test("an oversized image reference cannot cause unbounded page growth")
+    func oversizedImageReference() throws {
+        let marker = "![" + String(repeating: "x", count: 50_000) + "](tic-image://ABCD-1234)"
+        let text = "# Clipboard\n" + marker + String(repeating: "b", count: 15_000)
+        let source = text as NSString
+        var page = try #require(ClipboardMarkdownPages.first(in: text))
+        var reconstructed = ""
+        while page.length > 0 {
+            #expect(page.length <= ClipboardMarkdownPages.maximumProtectedImageReferenceLength)
+            reconstructed += source.substring(with: page)
+            if NSMaxRange(page) == source.length { break }
+            page = ClipboardMarkdownPages.next(in: text, from: NSMaxRange(page))
+        }
+        #expect(reconstructed == text)
+    }
+
+    @Test("a large edit is re-paged around the caret without changing the source")
+    func largeEditReflow() throws {
+        let text = "# Clipboard\n" + String(repeating: "large paste 📝", count: 45_000) + "\nolder content"
+        let source = text as NSString
+        let caret = source.range(of: "\nolder content").location
+        let page = ClipboardMarkdownPages.pageContainingCaret(in: text, caret: caret)
+        #expect(page.location <= caret)
+        #expect(NSMaxRange(page) >= caret)
+        #expect(page.length <= ClipboardMarkdownPages.maximumProtectedImageReferenceLength)
+        let shown = source.substring(with: page)
+        let restored = ClipboardMarkdownPages.replacing(page, in: text, with: shown)
+        #expect(restored == text)
+        #expect(caret - page.location <= (shown as NSString).length)
+    }
+
+    @Test("reflow keeps an image reference whole when the caret is inside it")
+    func reflowInsideImageReference() {
+        let marker = "![image](tic-image://12345678-1234-1234-1234-123456789ABC)"
+        let text = String(repeating: "a", count: 15_000) + marker + String(repeating: "b", count: 15_000)
+        let source = text as NSString
+        let markerRange = source.range(of: marker)
+        let page = ClipboardMarkdownPages.pageContainingCaret(in: text, caret: markerRange.location + 15)
+        #expect(source.substring(with: page).contains(marker))
+    }
+
     @Test("editing a page leaves content and inline image references outside it intact")
     func editPage() throws {
         let text = "# Clipboard\n" + String(repeating: "entry\n---\n", count: 4_000)

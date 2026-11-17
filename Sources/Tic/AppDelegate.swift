@@ -20,7 +20,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         Task { @MainActor in
-            await AppModel.shared.windows.flushPendingWrites()
+            let model = AppModel.shared
+            draining: while true {
+                let result = await model.drainClipboardWrites()
+                if case .completed = result { break }
+                let alert = NSAlert()
+                switch result {
+                case .timedOut:
+                    alert.messageText = AppLanguage.text("剪贴板内容仍在保存", "Clipboard items are still saving")
+                    alert.informativeText = AppLanguage.text("继续等待可以避免丢失尚未保存的内容。", "Waiting helps prevent losing unsaved clipboard items.")
+                    alert.addButton(withTitle: AppLanguage.text("继续等待", "Keep Waiting"))
+                    alert.addButton(withTitle: AppLanguage.text("仍然退出", "Quit Anyway"))
+                    if alert.runModal() == .alertSecondButtonReturn { break draining }
+                case .failed:
+                    alert.messageText = AppLanguage.text("部分剪贴板内容保存失败", "Some clipboard items could not be saved")
+                    alert.informativeText = AppLanguage.text("继续退出可能丢失未保存的内容。", "Unsaved items may be lost if you quit.")
+                    alert.addButton(withTitle: AppLanguage.text("取消退出", "Cancel Quit"))
+                    alert.addButton(withTitle: AppLanguage.text("仍然退出", "Quit Anyway"))
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        model.resumeClipboardCapture()
+                        sender.reply(toApplicationShouldTerminate: false)
+                        return
+                    }
+                    break draining
+                case .completed: break
+                }
+            }
+            await model.windows.flushPendingWrites()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

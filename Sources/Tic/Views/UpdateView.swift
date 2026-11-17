@@ -98,10 +98,16 @@ struct UpdateView: View {
                 Text("Installing v\(release.version)…").font(.callout).foregroundStyle(.secondary)
                 Spacer()
             case .failed(let reason):
-                Text("Couldn't update: \(reason)").font(.callout).foregroundStyle(.secondary).lineLimit(2)
-                Spacer()
-                Button("Open Release Page") { updates.openReleasePage() }
-                Button("Close") { model.dismissUpdate() }.keyboardShortcut(.defaultAction)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Couldn't update: \(reason)")
+                        .font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Spacer()
+                        Button("Open Release Page") { updates.openReleasePage() }
+                        Button("Close") { model.dismissUpdate() }.keyboardShortcut(.defaultAction)
+                    }
+                }
             }
         }
         .padding(18)

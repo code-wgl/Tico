@@ -169,7 +169,14 @@ final class UpdateChecker {
     }
 
     nonisolated static func installOverRunningApp(_ release: Release) async throws {
-        try await UpdateInstaller().install(version: release.version, replacing: Bundle.main.bundleURL)
+        do {
+            try await UpdateInstaller(beforeSwap: {
+                try await AppModel.shared.prepareClipboardForUpdate()
+            }).install(version: release.version, replacing: Bundle.main.bundleURL)
+        } catch {
+            await AppModel.shared.resumeClipboardCapture()
+            throw error
+        }
     }
 
     static func relaunch() {

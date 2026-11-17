@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Darwin
 
 /// Replaces the installed Tico with a release: downloads `Tico.zip`, checks it against
 /// `Tico.zip.sha256`, unpacks it, confirms its identity and version and checks its signature,
@@ -13,7 +14,9 @@ struct UpdateInstaller: Sendable {
         case wrongApp
         case wrongVersion(String)
         case badSignature
-        case recoveryRequired(String)
+        case incompatibleSystem(String)
+        case incompatibleArchitecture
+        case swapFailed
 
         var errorDescription: String? {
             switch self {
@@ -23,7 +26,9 @@ struct UpdateInstaller: Sendable {
             case .wrongApp: "The download wasn't Tico."
             case .wrongVersion(let found): "The download was v\(found), not the expected version."
             case .badSignature: "The downloaded app's signature is broken."
-            case .recoveryRequired(let path): "The original app could not be restored automatically. It is preserved at \(path)."
+            case .incompatibleSystem(let version): "This update requires macOS \(version)."
+            case .incompatibleArchitecture: "This update does not support this Mac's processor."
+            case .swapFailed: "The update could not be safely installed on this volume. Your current app is unchanged."
             }
         }
     }
@@ -33,6 +38,22 @@ struct UpdateInstaller: Sendable {
         let (data, response) = try await URLSession.shared.data(from: url)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
         return data
+    }
+
+    var supportsArchitecture: @Sendable (URL) async -> Bool = { executable in
+        #if arch(arm64)
+        let cpuType: UInt32 = 0x0100000c
+        #else
+        let cpuType: UInt32 = 0x01000007
+        #endif
+        guard let data = try? Data(contentsOf: executable, options: .mappedIfSafe) else { return false }
+        return Self.supportsMachO(data, cpuType: cpuType)
+    }
+
+    /// Called after validation and immediately before replacing the running app.
+    var beforeSwap: @Sendable () async throws -> Void = {}
+    var atomicSwap: @Sendable (URL, URL) -> Bool = { old, new in
+        renamex_np(old.path, new.path, UInt32(RENAME_SWAP)) == 0
     }
 
     /// Pinned to the version the user was offered, not `latest`, so a release landing mid-update can't
@@ -60,8 +81,7 @@ struct UpdateInstaller: Sendable {
         let staging = try files.url(
             for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: app, create: true
         )
-        var preserveStaging = false
-        defer { if !preserveStaging { try? files.removeItem(at: staging) } }
+        defer { try? files.removeItem(at: staging) }
         let archive = staging.appendingPathComponent("Tico.zip")
         try archiveData.write(to: archive)
         guard await Self.run("/usr/bin/ditto", "-x", "-k", archive.path, staging.path) else { throw Failure.badArchive }
@@ -74,23 +94,74 @@ struct UpdateInstaller: Sendable {
         let found = newInfo["CFBundleShortVersionString"] as? String ?? "?"
         guard found == version else { throw Failure.wrongVersion(found) }
         guard await Self.run("/usr/bin/codesign", "--verify", "--deep", "--strict", new.path) else { throw Failure.badSignature }
-
-        // Two renames (old copy aside, new one in), restoring the old copy if the second fails. Plain
-        // moves rather than `replaceItemAt`, which carries the old copy's metadata onto the new one.
-        let old = staging.appendingPathComponent("old.app")
-        try files.moveItem(at: app, to: old)
-        do {
-            try files.moveItem(at: new, to: app)
-        } catch {
-            do {
-                try files.moveItem(at: old, to: app)
-            } catch {
-                // Never delete the only remaining copy if restoring it fails as well.
-                preserveStaging = true
-                throw Failure.recoveryRequired(old.path)
-            }
-            throw error
+        let minimum = newInfo["LSMinimumSystemVersion"] as? String ?? "?"
+        guard Self.supportsSystemVersion(minimum, current: ProcessInfo.processInfo.operatingSystemVersion) else {
+            throw Failure.incompatibleSystem(minimum)
         }
+        guard let executable = newInfo["CFBundleExecutable"] as? String,
+              executable == "Tic",
+              await supportsArchitecture(new.appendingPathComponent("Contents/MacOS").appendingPathComponent(executable)) else {
+            throw Failure.incompatibleArchitecture
+        }
+        try await beforeSwap()
+
+        // Exchange both directory entries atomically: a crash cannot leave the app path empty.
+        // If the filesystem cannot exchange them, leave the existing app in place.
+        guard atomicSwap(app, new) else { throw Failure.swapFailed }
+    }
+
+    static func supportsSystemVersion(_ minimum: String, current: OperatingSystemVersion) -> Bool {
+        let parts = minimum.split(separator: ".", omittingEmptySubsequences: false)
+        guard (1...3).contains(parts.count), parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }),
+              parts.allSatisfy({ Int($0) != nil }) else { return false }
+        let required = parts.compactMap { Int($0) } + Array(repeating: 0, count: 3 - parts.count)
+        let installed = [current.majorVersion, current.minorVersion, current.patchVersion]
+        return !required.lexicographicallyPrecedes(installed) ? required == installed : true
+    }
+
+    /// Inspect Mach-O headers without Xcode or Command Line Tools. Reject truncated, mismatched,
+    /// non-executable and CPU-specialized slices rather than guessing that they can run.
+    static func supportsMachO(_ data: Data, cpuType: UInt32) -> Bool {
+        func word(_ offset: Int, bigEndian: Bool) -> UInt32? {
+            guard offset >= 0, offset <= data.count, data.count - offset >= 4 else { return nil }
+            let bytes = data[offset..<(offset + 4)]
+            return bigEndian ? bytes.reduce(0) { ($0 << 8) | UInt32($1) }
+                : bytes.reversed().reduce(0) { ($0 << 8) | UInt32($1) }
+        }
+        func doubleWord(_ offset: Int, bigEndian: Bool) -> UInt64? {
+            guard let first = word(offset, bigEndian: bigEndian),
+                  let second = word(offset + 4, bigEndian: bigEndian) else { return nil }
+            return bigEndian ? UInt64(first) << 32 | UInt64(second) : UInt64(second) << 32 | UInt64(first)
+        }
+        func thinSlice(_ offset: Int, size: Int) -> Bool {
+            guard size >= 32, offset >= 0, offset <= data.count, size <= data.count - offset,
+                  let magic = word(offset, bigEndian: true), magic == 0xcffaedfe,
+                  word(offset + 4, bigEndian: false) == cpuType,
+                  let subtype = word(offset + 8, bigEndian: false),
+                  word(offset + 12, bigEndian: false) == 2 else { return false } // MH_EXECUTE
+            // x86_64h / arm64e are not guaranteed to run on every Mac of that architecture.
+            let baseSubtype = subtype & 0x00ffffff
+            return cpuType == 0x01000007 ? baseSubtype == 3 : baseSubtype == 0 || baseSubtype == 1
+        }
+
+        guard let magic = word(0, bigEndian: true) else { return false }
+        if magic == 0xcffaedfe { return thinSlice(0, size: data.count) }
+        let bigEndian = magic == 0xcafebabe || magic == 0xcafebabf
+        let littleEndian = magic == 0xbebafeca || magic == 0xbfbafeca
+        guard bigEndian || littleEndian, let count = word(4, bigEndian: bigEndian), count > 0, count <= 128 else { return false }
+        let fat64 = magic == 0xcafebabf || magic == 0xbfbafeca
+        let stride = fat64 ? 32 : 20
+        guard data.count >= 8 + Int(count) * stride else { return false }
+        for index in 0..<Int(count) {
+            let entry = 8 + index * stride
+            guard word(entry, bigEndian: bigEndian) == cpuType else { continue }
+            let offset = fat64 ? doubleWord(entry + 8, bigEndian: bigEndian) : word(entry + 8, bigEndian: bigEndian).map(UInt64.init)
+            let size = fat64 ? doubleWord(entry + 16, bigEndian: bigEndian) : word(entry + 12, bigEndian: bigEndian).map(UInt64.init)
+            guard let offset, let size, let start = Int(exactly: offset), let length = Int(exactly: size),
+                  start >= 8 + Int(count) * stride else { continue }
+            if thinSlice(start, size: length) { return true }
+        }
+        return false
     }
 
     /// Reopens `app` once this process has exited. The shell outlives Tic, waits for its pid to go, and

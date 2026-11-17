@@ -46,6 +46,9 @@ struct NoteView: View {
     /// A window into the full clipboard note. Other notes retain the normal single editor.
     @State private var clipboardPageRange: NSRange?
     @State private var clipboardPageGeneration = 0
+    @State private var clipboardReflowSelection: NSRange?
+    @State private var clipboardReflowRequest = 0
+    @State private var clipboardReflowNotice = false
     @State private var clipboardHasMarkedText = false
     @State private var pendingInlineImagePastes = 0
     @State private var taskInsertRequest = 0
@@ -113,6 +116,8 @@ struct NoteView: View {
         }
         .onChange(of: clipboardNoteID) { _, _ in
             clipboardPageRange = nil
+            clipboardReflowSelection = nil
+            clipboardReflowNotice = false
             clipboardPageGeneration += 1
         }
         .onChange(of: note.isCollapsed) { _, collapsed in
@@ -273,6 +278,10 @@ extension NoteView {
                            trackAnimatedContentHeight: !controller.tasks.isEmpty,
                            segmentGeneration: clipboardPageGeneration,
                            isSegmented: effectiveClipboardPage != nil,
+                           usesPaging: isClipboardNote,
+                           segmentSelection: clipboardReflowSelection,
+                           reflowRequest: clipboardReflowRequest,
+                           onLargeSegment: reflowClipboardPage,
                            onMarkedTextChange: clipboardCompositionChanged,
                            onFocusHandled: controller.clearMarkdownFocusRequest,
                            onAddTask: addTask,
@@ -307,6 +316,9 @@ extension NoteView {
             displayedMarkdown
         } set: { page in
             guard let range = effectiveClipboardPage else {
+                if isClipboardNote && (page as NSString).length > ClipboardMarkdownPages.pageSize {
+                    clipboardPageRange = NSRange(location: 0, length: (page as NSString).length)
+                }
                 markdownText = page
                 return
             }
@@ -335,11 +347,13 @@ extension NoteView {
                     Spacer(minLength: 0)
                     Text(pendingInlineImagePastes > 0
                          ? AppLanguage.text("图片处理中…", "Preparing image…")
-                         : AppLanguage.text("分段编辑", "Editing one segment"))
+                         : clipboardReflowNotice
+                            ? AppLanguage.text("已分段，撤销已清空", "Re-paged; undo cleared")
+                            : AppLanguage.text("分段编辑", "Editing one segment"))
                         .font(.caption2)
                         .foregroundStyle(theme.secondary)
-                        .help(AppLanguage.text("全选和撤销仅作用于当前分段；切换分段会结束当前撤销历史。",
-                                               "Select All and Undo apply to the current segment; changing segments clears its undo history."))
+                        .help(AppLanguage.text("全选和撤销仅作用于当前分段；手动或自动切换分段会清空撤销历史。",
+                                               "Select All and Undo apply to the current segment; changing segments, including automatic re-paging, clears undo history."))
                     Spacer(minLength: 0)
                     Button(AppLanguage.text("较早", "Older")) {
                         guard pendingInlineImagePastes == 0 else { return }
@@ -363,6 +377,8 @@ extension NoteView {
     private func finishClipboardPageEditing() {
         let window = NSApp.keyWindow
         window?.makeFirstResponder(nil) // Commit any marked text before changing the bound range.
+        clipboardReflowSelection = nil
+        clipboardReflowNotice = false
         clipboardPageGeneration += 1
     }
 
@@ -386,10 +402,23 @@ extension NoteView {
         // Let the editor commit the composed text or image before reducing the expanded page.
         DispatchQueue.main.async {
             guard !clipboardHasMarkedText, pendingInlineImagePastes == 0, isClipboardNote, let page = effectiveClipboardPage,
-                  page.location == 0, page.length > ClipboardMarkdownPages.pageSize * 2 else { return }
-            clipboardPageRange = ClipboardMarkdownPages.first(in: markdownText)
-            clipboardPageGeneration += 1
+                  page.length > ClipboardMarkdownPages.pageSize * 2 else { return }
+            clipboardReflowRequest += 1
         }
+    }
+
+    private func reflowClipboardPage(_ selection: NSRange) {
+        guard isClipboardNote, !clipboardHasMarkedText, pendingInlineImagePastes == 0,
+              let current = effectiveClipboardPage, current.length > ClipboardMarkdownPages.pageSize * 2,
+              selection.location != NSNotFound, NSMaxRange(selection) <= current.length,
+              selection.length <= ClipboardMarkdownPages.pageSize else { return }
+        let absolute = NSRange(location: current.location + selection.location, length: selection.length)
+        let page = ClipboardMarkdownPages.pageContainingCaret(in: markdownText, caret: NSMaxRange(absolute))
+        guard page.location <= absolute.location, NSMaxRange(page) >= NSMaxRange(absolute) else { return }
+        clipboardReflowSelection = NSRange(location: absolute.location - page.location, length: absolute.length)
+        clipboardPageRange = page
+        clipboardReflowNotice = true
+        clipboardPageGeneration += 1
     }
 
     private var firstLineIsHeading: Bool {

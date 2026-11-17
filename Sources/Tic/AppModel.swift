@@ -27,6 +27,8 @@ final class AppModel {
     @ObservationIgnored private let mcp: MCPService
     @ObservationIgnored private var clipboardTimer: Timer?
     @ObservationIgnored private var clipboardWrite: Task<Void, Never>?
+    @ObservationIgnored private var clipboardWritesInFlight = 0
+    @ObservationIgnored private var clipboardWriteFailed = false
     @ObservationIgnored private var clipboardChangeCount = NSPasteboard.general.changeCount
     @ObservationIgnored private var lastClipboardCapture: ClipboardCapture? = {
         guard let data = UserDefaults.standard.data(forKey: AppModel.lastClipboardCaptureKey) else { return nil }
@@ -188,7 +190,9 @@ final class AppModel {
         if let image { identity.append(contentsOf: SHA256.hash(data: image)) }
         let contentHash = Data(SHA256.hash(data: identity)).base64EncodedString()
         let previous = clipboardWrite
+        clipboardWritesInFlight += 1
         clipboardWrite = Task { [self, database, windows] in
+            defer { clipboardWritesInFlight -= 1 }
             await previous?.value
             do { try await windows.restoreClipboardTitle(for: noteID) }
             catch { NSLog("[Tic] clipboard title restore failed: \(error)") }
@@ -231,7 +235,59 @@ final class AppModel {
                 if let data = try? JSONEncoder().encode(capture) {
                     UserDefaults.standard.set(data, forKey: Self.lastClipboardCaptureKey)
                 }
-            } catch { NSLog("[Tic] clipboard capture failed: \(error)") }
+            } catch {
+                clipboardWriteFailed = true
+                NSLog("[Tic] clipboard capture failed: \(error)")
+            }
+        }
+    }
+
+    enum ClipboardDrainResult { case completed, failed, timedOut }
+    enum ClipboardDrainFailure: LocalizedError {
+        case failed, timedOut
+        var errorDescription: String? {
+            switch self {
+            case .failed: AppLanguage.text("剪贴板内容保存失败，更新已取消。", "Clipboard saving failed; the update was cancelled.")
+            case .timedOut: AppLanguage.text("剪贴板内容仍在保存，请稍后重试更新。", "Clipboard items are still saving. Try updating again shortly.")
+            }
+        }
+    }
+
+    /// Stop accepting new clipboard changes, then give already captured items time to persist.
+    func drainClipboardWrites() async -> ClipboardDrainResult {
+        // Capture the latest change even when quit arrives before the next timer tick.
+        captureClipboardChange()
+        clipboardTimer?.invalidate()
+        clipboardTimer = nil
+        let drained = await Self.waitForClipboardWrites { self.clipboardWritesInFlight > 0 }
+        guard drained else { return .timedOut }
+        if clipboardWriteFailed {
+            // Report each failure once; after the caller alerts the user they can retry.
+            clipboardWriteFailed = false
+            return .failed
+        }
+        return .completed
+    }
+
+    static func waitForClipboardWrites(attempts: Int = 100, interval: Duration = .milliseconds(100),
+                                       hasPending: () -> Bool) async -> Bool {
+        for _ in 0..<attempts {
+            if !hasPending() { return true }
+            try? await Task.sleep(for: interval)
+        }
+        return !hasPending()
+    }
+
+    func resumeClipboardCapture() {
+        captureClipboardChange()
+        startClipboardMonitor()
+    }
+
+    func prepareClipboardForUpdate() async throws {
+        switch await drainClipboardWrites() {
+        case .completed: return
+        case .failed: throw ClipboardDrainFailure.failed
+        case .timedOut: throw ClipboardDrainFailure.timedOut
         }
     }
 
