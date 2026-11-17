@@ -43,6 +43,11 @@ struct NoteView: View {
 
     @State private var markdownText: String
     @State private var markdownContentHeight: CGFloat = 28
+    /// A window into the full clipboard note. Other notes retain the normal single editor.
+    @State private var clipboardPageRange: NSRange?
+    @State private var clipboardPageGeneration = 0
+    @State private var clipboardHasMarkedText = false
+    @State private var pendingInlineImagePastes = 0
     @State private var taskInsertRequest = 0
     @State private var revealed = false
     @State private var showCloseConfirm = false
@@ -101,9 +106,17 @@ struct NoteView: View {
         // Keep the editor state current even while its expanded view is unmounted.
         // Clipboard captures can arrive while the note is rolled up.
         .onChange(of: controller.note.markdown) { _, value in
-            if markdownText != value { markdownText = value }
+            if markdownText != value {
+                updateClipboardPageForExternalChange(from: markdownText, to: value)
+                markdownText = value
+            }
+        }
+        .onChange(of: clipboardNoteID) { _, _ in
+            clipboardPageRange = nil
+            clipboardPageGeneration += 1
         }
         .onChange(of: note.isCollapsed) { _, collapsed in
+            if collapsed { clipboardHasMarkedText = false }
             if !collapsed && markdownText != controller.note.markdown {
                 markdownText = controller.note.markdown
             }
@@ -144,12 +157,17 @@ extension NoteView {
     // MARK: - Collapsed bar
 
     private var collapsedBar: some View {
-        let firstLine = markdownText.components(separatedBy: .newlines).first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let firstLine = String(markdownText.prefix { !$0.isNewline }).trimmingCharacters(in: .whitespacesAndNewlines)
         let unmarkedTitle = firstLine.replacingOccurrences(of: #"^#{1,6}\s+"#, with: "", options: .regularExpression)
         let compactTitle = unmarkedTitle.isEmpty ? (note.title.isEmpty ? "Untitled List" : note.title) : unmarkedTitle
-        let markdownRemaining = markdownText.components(separatedBy: .newlines).filter {
-            $0.range(of: #"^\s*[-*+] \[ \](\s|$)"#, options: .regularExpression) != nil
-        }.count
+        var markdownRemaining = 0
+        markdownText.enumerateLines { line, _ in
+            let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+            if (trimmed.hasPrefix("- [ ]") || trimmed.hasPrefix("* [ ]") || trimmed.hasPrefix("+ [ ]")),
+               (trimmed.count == 5 || trimmed.dropFirst(5).first?.isWhitespace == true) {
+                markdownRemaining += 1
+            }
+        }
         let remaining = controller.tasks.filter { !$0.isDone }.count + markdownRemaining
         return GeometryReader { geometry in
             let height = geometry.size.height
@@ -191,7 +209,7 @@ extension NoteView {
             )
             GeometryReader { geometry in
                 VStack(spacing: 0) {
-                    markdownBody
+                    markdownBodyWithPaging
                         .frame(height: controller.tasks.isEmpty ? geometry.size.height : markdownHeight(in: geometry.size.height))
                     if !controller.tasks.isEmpty { taskList }
                 }
@@ -247,16 +265,26 @@ extension NoteView {
     }
 
     private var markdownBody: some View {
-        MarkdownNoteEditor(text: $markdownText, textColor: theme.task, paperColor: note.color.fill, inlineImages: controller.inlineImages,
+        MarkdownNoteEditor(text: clipboardPageBinding, textColor: theme.task, paperColor: note.color.fill, inlineImages: controller.inlineImages,
                            focusRequest: controller.markdownFocusRequest,
                            taskInsertRequest: taskInsertRequest,
                            separateCompletedTasks: note.moveCompletedToBottom,
                            hideCompletedTasks: note.hideCompleted,
                            trackAnimatedContentHeight: !controller.tasks.isEmpty,
+                           segmentGeneration: clipboardPageGeneration,
+                           isSegmented: effectiveClipboardPage != nil,
+                           onMarkedTextChange: clipboardCompositionChanged,
                            onFocusHandled: controller.clearMarkdownFocusRequest,
                            onAddTask: addTask,
                            onPasteImage: { data, completion in
-                               Task { if let result = await controller.storeInlineImage(data) { completion(result.0, result.1) } }
+                               pendingInlineImagePastes += 1
+                               Task {
+                                   defer {
+                                       pendingInlineImagePastes -= 1
+                                       normalizeClipboardPageIfNeeded()
+                                   }
+                                   if let result = await controller.storeInlineImage(data) { completion(result.0, result.1) }
+                               }
                            },
                            onContentHeightChange: { markdownContentHeight = $0 })
             .padding(.horizontal, 12)
@@ -264,8 +292,108 @@ extension NoteView {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    /// Show only one bounded chunk in TextKit; the controller always saves the complete document.
+    private var effectiveClipboardPage: NSRange? {
+        guard isClipboardNote else { return nil }
+        let length = (markdownText as NSString).length
+        if let range = clipboardPageRange, range.location >= 0, NSMaxRange(range) <= length {
+            return range
+        }
+        return ClipboardMarkdownPages.first(in: markdownText)
+    }
+
+    private var clipboardPageBinding: Binding<String> {
+        Binding {
+            displayedMarkdown
+        } set: { page in
+            guard let range = effectiveClipboardPage else {
+                markdownText = page
+                return
+            }
+            let updated = ClipboardMarkdownPages.replacing(range, in: markdownText, with: page)
+            clipboardPageRange = NSRange(location: range.location, length: (page as NSString).length)
+            markdownText = updated
+        }
+    }
+
+    private var displayedMarkdown: String {
+        guard let range = effectiveClipboardPage else { return markdownText }
+        return (markdownText as NSString).substring(with: range)
+    }
+
+    private var markdownBodyWithPaging: some View {
+        VStack(spacing: 0) {
+            markdownBody
+            if let page = effectiveClipboardPage {
+                HStack(spacing: 8) {
+                    Button(AppLanguage.text("较新", "Newer")) {
+                        guard pendingInlineImagePastes == 0 else { return }
+                        finishClipboardPageEditing()
+                        clipboardPageRange = ClipboardMarkdownPages.previous(in: markdownText, before: page.location)
+                    }
+                    .disabled(page.location == 0 || pendingInlineImagePastes > 0)
+                    Spacer(minLength: 0)
+                    Text(pendingInlineImagePastes > 0
+                         ? AppLanguage.text("图片处理中…", "Preparing image…")
+                         : AppLanguage.text("分段编辑", "Editing one segment"))
+                        .font(.caption2)
+                        .foregroundStyle(theme.secondary)
+                        .help(AppLanguage.text("全选和撤销仅作用于当前分段；切换分段会结束当前撤销历史。",
+                                               "Select All and Undo apply to the current segment; changing segments clears its undo history."))
+                    Spacer(minLength: 0)
+                    Button(AppLanguage.text("较早", "Older")) {
+                        guard pendingInlineImagePastes == 0 else { return }
+                        finishClipboardPageEditing()
+                        clipboardPageRange = ClipboardMarkdownPages.next(in: markdownText, from: NSMaxRange(page))
+                    }
+                    .disabled(NSMaxRange(page) >= (markdownText as NSString).length || pendingInlineImagePastes > 0)
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+                .accessibilityElement(children: .contain)
+            }
+        }
+        .onAppear { controller.setVisibleInlineImageMarkdown(displayedMarkdown) }
+        .onChange(of: displayedMarkdown) { _, text in controller.setVisibleInlineImageMarkdown(text) }
+        .onDisappear { controller.setVisibleInlineImageMarkdown("") }
+    }
+
+    private func finishClipboardPageEditing() {
+        let window = NSApp.keyWindow
+        window?.makeFirstResponder(nil) // Commit any marked text before changing the bound range.
+        clipboardPageGeneration += 1
+    }
+
+    private func updateClipboardPageForExternalChange(from old: String, to new: String) {
+        guard isClipboardNote else { return }
+        let preservingEdit = clipboardHasMarkedText || pendingInlineImagePastes > 0
+        let page = effectiveClipboardPage ?? (preservingEdit ? NSRange(location: 0, length: (old as NSString).length) : nil)
+        guard let page else { return }
+        clipboardPageRange = ClipboardMarkdownPages.afterExternalChange(
+            page, old: old, new: new, composing: preservingEdit
+        )
+    }
+
+    private func clipboardCompositionChanged(_ marked: Bool) {
+        clipboardHasMarkedText = marked
+        guard !marked else { return }
+        normalizeClipboardPageIfNeeded()
+    }
+
+    private func normalizeClipboardPageIfNeeded() {
+        // Let the editor commit the composed text or image before reducing the expanded page.
+        DispatchQueue.main.async {
+            guard !clipboardHasMarkedText, pendingInlineImagePastes == 0, isClipboardNote, let page = effectiveClipboardPage,
+                  page.location == 0, page.length > ClipboardMarkdownPages.pageSize * 2 else { return }
+            clipboardPageRange = ClipboardMarkdownPages.first(in: markdownText)
+            clipboardPageGeneration += 1
+        }
+    }
+
     private var firstLineIsHeading: Bool {
-        let first = markdownText.split(separator: "\n", omittingEmptySubsequences: false).first ?? ""
+        let first = markdownText.prefix { !$0.isNewline }
         let hashes = first.prefix(while: { $0 == "#" }).count
         return (1...6).contains(hashes) && first.dropFirst(hashes).first == " "
     }

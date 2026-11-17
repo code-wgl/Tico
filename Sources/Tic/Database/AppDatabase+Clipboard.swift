@@ -62,10 +62,22 @@ extension AppDatabase {
         }
     }
 
-    func observeInlineImages(noteID: UUID) -> AsyncValueObservation<[NoteInlineImage]> {
-        ValueObservation.tracking { db in
-            try NoteInlineImage.fetchAll(db, sql: "SELECT id, COALESCE(thumbnail, data) AS data FROM noteInlineImage WHERE noteId = ?",
-                                         arguments: [noteID])
+    /// Load only the image references in the displayed editor segment. Unreferenced image rows
+    /// are retained in the database for the other segments and for complete exports.
+    func observeInlineImages(noteID: UUID, ids: Set<String>) -> AsyncValueObservation<[NoteInlineImage]> {
+        let selected = ids.sorted()
+        return ValueObservation.tracking { db in
+            var images: [NoteInlineImage] = []
+            for offset in stride(from: 0, to: selected.count, by: 500) {
+                let chunk = Array(selected[offset..<min(offset + 500, selected.count)])
+                let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+                let arguments = StatementArguments([noteID]) + StatementArguments(chunk)
+                images += try NoteInlineImage.fetchAll(db, sql: """
+                    SELECT id, COALESCE(thumbnail, data) AS data FROM noteInlineImage
+                    WHERE noteId = ? AND id IN (\(placeholders))
+                    """, arguments: arguments)
+            }
+            return images
         }.values(in: dbQueue)
     }
 

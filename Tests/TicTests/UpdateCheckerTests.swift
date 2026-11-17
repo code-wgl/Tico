@@ -24,24 +24,34 @@ struct UpdateCheckerTests {
     @Test("parses the releases list: newest published version, every release's notes, no drafts or betas")
     func parse() throws {
         let json = #"""
-            [{"tag_name":"v0.9.1-beta","html_url":"https://x/b","body":"","published_at":null,"draft":false,"prerelease":true},
-             {"tag_name":"v0.9.0","html_url":"https://github.com/kasvith/tic/releases/tag/v0.9.0",
+            [{"tag_name":"v0.9.1-beta","html_url":"https://x/b","body":"","published_at":null,"draft":false,"prerelease":true,"assets":[]},
+             {"tag_name":"v0.9.0","html_url":"https://github.com/code-wgl/Tico/releases/tag/v0.9.0",
               "body":"## [0.9.0] - 2026-11-02\n\n### Features\n\n- *(update)* Install updates from the menu bar\n",
-              "published_at":"2026-11-02T10:00:00Z","draft":false,"prerelease":false},
-             {"tag_name":"v1.0.0","html_url":"https://x/d","body":"","published_at":null,"draft":true,"prerelease":false},
-             {"tag_name":"v0.10.0-never","html_url":"https://x/old","body":"","published_at":null,"draft":true,"prerelease":false},
-             {"tag_name":"v0.8.0","html_url":"https://github.com/kasvith/tic/releases/tag/v0.8.0",
+              "published_at":"2026-11-02T10:00:00Z","draft":false,"prerelease":false,"assets":[{"name":"Tico.zip","state":"uploaded"},{"name":"Tico.zip.sha256","state":"uploaded"}]},
+             {"tag_name":"v1.0.0","html_url":"https://x/d","body":"","published_at":null,"draft":true,"prerelease":false,"assets":[]},
+             {"tag_name":"v0.10.0-never","html_url":"https://x/old","body":"","published_at":null,"draft":true,"prerelease":false,"assets":[]},
+             {"tag_name":"v0.8.0","html_url":"https://github.com/code-wgl/Tico/releases/tag/v0.8.0",
               "body":"## [0.8.0] - 2026-10-26\n\n### Bug Fixes\n\n- Fix it\n","published_at":"2026-10-26T18:04:29Z",
-              "draft":false,"prerelease":false}]
+              "draft":false,"prerelease":false,"assets":[{"name":"Tico.zip","state":"uploaded"},{"name":"Tico.zip.sha256","state":"uploaded"}]}]
             """#
         let release = try UpdateChecker.parse(Data(json.utf8))
         #expect(release.version == "0.9.0")
-        #expect(release.url.absoluteString == "https://github.com/kasvith/tic/releases/tag/v0.9.0")
+        #expect(release.url.absoluteString == "https://github.com/code-wgl/Tico/releases/tag/v0.9.0")
         #expect(release.notes.map(\.version) == ["0.9.0", "0.8.0"])
         #expect(release.notes[0].sections == [.init(title: "Features", items: ["Install updates from the menu bar"])])
         #expect(release.notes[0].date != nil)
         #expect(throws: (any Error).self) { try UpdateChecker.parse(Data("[]".utf8)) }
         #expect(throws: (any Error).self) { try UpdateChecker.parse(Data("{}".utf8)) }
+    }
+
+    @Test("ignores newer releases without both uploaded Tico assets and malformed tags")
+    func installableReleasesOnly() throws {
+        let json = #"""
+            [{"tag_name":"v3.0.0","html_url":"https://github.com/code-wgl/Tico/releases/tag/v3.0.0","body":"","published_at":null,"draft":false,"prerelease":false,"assets":[{"name":"Tico.zip","state":"uploaded"}]},
+             {"tag_name":"v2.0.0-rc","html_url":"https://github.com/code-wgl/Tico/releases/tag/v2.0.0-rc","body":"","published_at":null,"draft":false,"prerelease":false,"assets":[{"name":"Tico.zip","state":"uploaded"},{"name":"Tico.zip.sha256","state":"uploaded"}]},
+             {"tag_name":"v1.2.3","html_url":"https://github.com/code-wgl/Tico/releases/tag/v1.2.3","body":"","published_at":null,"draft":false,"prerelease":false,"assets":[{"name":"Tico.zip","state":"uploaded"},{"name":"Tico.zip.sha256","state":"uploaded"}]}]
+            """#
+        #expect(try UpdateChecker.parse(Data(json.utf8)).version == "1.2.3")
     }
 
     @Test("release notes: git-cliff groups become sections, scopes are dropped, the rest is ignored")
@@ -87,7 +97,7 @@ struct UpdateCheckerStateTests {
     /// Restarts the stubbed installer asked for (the real one would quit the test runner).
     final class Restarts { var count = 0 }
 
-    private nonisolated static let releasePage = URL(string: "https://github.com/kasvith/tic/releases/tag/v0.6.0")!
+    private nonisolated static let releasePage = URL(string: "https://github.com/code-wgl/Tico/releases/tag/v0.6.0")!
 
     private static func freshDefaults() -> UserDefaults {
         let name = "UpdateCheckerTests.\(UUID().uuidString)"

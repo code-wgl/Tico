@@ -63,14 +63,13 @@ if [ ! -f "$APP/Contents/Resources/Tic_Tic.bundle/MenuBarIcon.png" ] && \
     exit 1
 fi
 
-VERSION="${VERSION:-1.0.11}"
+VERSION="${VERSION:-1.0.12}"
 echo "▸ Stamping ${CHANNEL} version ${VERSION}…"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_VERSION:-12}" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_ID}" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName ${APP_NAME}" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ${DISPLAY_NAME}" "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c 'Add :TicUpstreamUpdatesEnabled bool false' "$APP/Contents/Info.plist"
 
 echo "▸ Code signing (ad-hoc)…"
 codesign --force --sign - "$APP"

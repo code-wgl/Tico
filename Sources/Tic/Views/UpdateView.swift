@@ -86,7 +86,10 @@ struct UpdateView: View {
         HStack(spacing: 10) {
             switch updates.installState {
             case .idle:
-                Text("Tico restarts to finish; your lists are kept.").font(.callout).foregroundStyle(.secondary)
+                Text(AppLanguage.text(
+                    "将从 Tico 的 GitHub 发行版下载并重启。安装包未经 Apple 公证，请先备份便签。",
+                    "Downloads from Tico's GitHub releases and restarts the app. The build is not Apple-notarized; back up your notes first."
+                )).font(.callout).foregroundStyle(.secondary)
                 Spacer()
                 Button("Update Later") { model.dismissUpdate() }.keyboardShortcut(.cancelAction)
                 Button("Update Now") { updates.install() }.keyboardShortcut(.defaultAction)

@@ -8,6 +8,9 @@ import Observation
 @MainActor
 @Observable
 final class NoteController {
+    private static let inlineImageExpression = try? NSRegularExpression(
+        pattern: #"!\[[^\]\n]*\]\(tic-image://([0-9A-Fa-f-]+)\)"#
+    )
     let noteID: UUID
     private(set) var note: Note
     private(set) var tasks: [TaskItem] = []
@@ -27,6 +30,7 @@ final class NoteController {
     @ObservationIgnored private var noteObservation: Task<Void, Never>?
     @ObservationIgnored private var imageObservation: Task<Void, Never>?
     @ObservationIgnored private var inlineImageObservation: Task<Void, Never>?
+    @ObservationIgnored private var visibleInlineImageIDs: Set<String>?
     @ObservationIgnored private var markdownSave: Task<Void, Never>?
     @ObservationIgnored private var behaviorSave: Task<Void, Never>?
     @ObservationIgnored private var opacitySave: Task<Void, Never>?
@@ -65,14 +69,6 @@ final class NoteController {
 
     /// Begins streaming this note's tasks; each emission replaces `tasks` and updates the UI.
     func start() {
-        inlineImageObservation?.cancel()
-        inlineImageObservation = Task { [weak self, db, noteID] in
-            do {
-                for try await images in db.observeInlineImages(noteID: noteID) {
-                    self?.inlineImages = Dictionary(uniqueKeysWithValues: images.map { ($0.id, $0.data) })
-                }
-            } catch { NSLog("[Tic] inline image observation ended: \(error)") }
-        }
         observation?.cancel()
         observation = Task { [weak self, db, noteID] in
             do {
@@ -111,12 +107,35 @@ final class NoteController {
     func stop() {
         inlineImageObservation?.cancel()
         inlineImageObservation = nil
+        visibleInlineImageIDs = nil
+        inlineImages = [:]
         observation?.cancel()
         observation = nil
         noteObservation?.cancel()
         noteObservation = nil
         imageObservation?.cancel()
         imageObservation = nil
+    }
+
+    /// Only keep the images referenced in the editor's current segment in memory.
+    func setVisibleInlineImageMarkdown(_ markdown: String) {
+        let source = markdown as NSString
+        let ids = Set(Self.inlineImageExpression?.matches(in: markdown, range: NSRange(location: 0, length: source.length)).map {
+            source.substring(with: $0.range(at: 1))
+        } ?? [])
+        guard visibleInlineImageIDs != ids else { return }
+        visibleInlineImageIDs = ids
+        inlineImageObservation?.cancel()
+        inlineImages = inlineImages.filter { ids.contains($0.key) }
+        guard !ids.isEmpty else { inlineImageObservation = nil; return }
+        inlineImageObservation = Task { [weak self, db, noteID] in
+            do {
+                for try await images in db.observeInlineImages(noteID: noteID, ids: ids) {
+                    guard !Task.isCancelled, let self, self.visibleInlineImageIDs == ids else { return }
+                    self.inlineImages = Dictionary(uniqueKeysWithValues: images.map { ($0.id, $0.data) })
+                }
+            } catch { NSLog("[Tic] inline image observation ended: \(error)") }
+        }
     }
 
     /// Applies an observed note-row change: replaces `note`, and drives the live window only for the
@@ -192,7 +211,7 @@ final class NoteController {
         do {
             try await db.storeInlineImage(noteID: noteID, id: id, data: data, thumbnail: thumbnail)
             let displayData = thumbnail ?? data
-            inlineImages[id] = displayData
+            if visibleInlineImageIDs?.contains(id) == true { inlineImages[id] = displayData }
             return (ClipboardContent.imageReference(id), displayData)
         } catch {
             NSLog("[Tic] inline image save failed: \(error)")
@@ -205,7 +224,7 @@ final class NoteController {
         guard lastMarkdownSubmitted != markdown else { return }
         lastMarkdownSubmitted = markdown
         note.markdown = markdown
-        let firstLine = markdown.split(separator: "\n", omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        let firstLine = String(markdown.prefix { $0 != "\n" })
         var title = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
         let hashes = title.prefix(while: { $0 == "#" }).count
         if (1...6).contains(hashes), title.dropFirst(hashes).first == " " {

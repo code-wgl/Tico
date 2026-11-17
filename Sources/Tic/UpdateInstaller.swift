@@ -1,8 +1,8 @@
 import CryptoKit
 import Foundation
 
-/// Replaces the installed Tic with a release: downloads `Tic.zip`, checks it against
-/// `Tic.zip.sha256`, unpacks it, confirms it's Tic at the expected version with an intact signature,
+/// Replaces the installed Tico with a release: downloads `Tico.zip`, checks it against
+/// `Tico.zip.sha256`, unpacks it, confirms its identity and version and checks its signature,
 /// then swaps it in. Files Tic downloads itself get no quarantine flag (it isn't sandboxed and doesn't
 /// set `LSFileQuarantineEnabled`), so the new copy opens without Gatekeeper's block, unsigned or not.
 struct UpdateInstaller: Sendable {
@@ -13,15 +13,17 @@ struct UpdateInstaller: Sendable {
         case wrongApp
         case wrongVersion(String)
         case badSignature
+        case recoveryRequired(String)
 
         var errorDescription: String? {
             switch self {
-            case .notWritable(let folder): "Tic can't replace itself in \(folder)."
+            case .notWritable(let folder): "Tico can't replace itself in \(folder)."
             case .checksumMismatch: "The download didn't match its checksum."
-            case .badArchive: "The download didn't contain Tic."
-            case .wrongApp: "The download wasn't Tic."
+            case .badArchive: "The download didn't contain Tico."
+            case .wrongApp: "The download wasn't Tico."
             case .wrongVersion(let found): "The download was v\(found), not the expected version."
             case .badSignature: "The downloaded app's signature is broken."
+            case .recoveryRequired(let path): "The original app could not be restored automatically. It is preserved at \(path)."
             }
         }
     }
@@ -36,7 +38,7 @@ struct UpdateInstaller: Sendable {
     /// Pinned to the version the user was offered, not `latest`, so a release landing mid-update can't
     /// swap in something they didn't see the notes for.
     static func assetURL(_ name: String, version: String) -> URL {
-        URL(string: "https://github.com/kasvith/tic/releases/download/v\(version)/\(name)")!
+        URL(string: "https://github.com/code-wgl/Tico/releases/download/v\(version)/\(name)")!
     }
 
     /// Replaces the app at `app` with `version`. On any failure the installed copy is left as it was.
@@ -47,8 +49,8 @@ struct UpdateInstaller: Sendable {
             throw Failure.notWritable(folder.path)
         }
 
-        async let zip = download(Self.assetURL("Tic.zip", version: version))
-        async let checksum = download(Self.assetURL("Tic.zip.sha256", version: version))
+        async let zip = download(Self.assetURL("Tico.zip", version: version))
+        async let checksum = download(Self.assetURL("Tico.zip.sha256", version: version))
         let (archiveData, checksumData) = try await (zip, checksum)
         let expected = String(bytes: checksumData, encoding: .utf8)?.split(whereSeparator: \.isWhitespace).first
         let actual = SHA256.hash(data: archiveData).map { String(format: "%02x", $0) }.joined()
@@ -58,18 +60,20 @@ struct UpdateInstaller: Sendable {
         let staging = try files.url(
             for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: app, create: true
         )
-        defer { try? files.removeItem(at: staging) }
-        let archive = staging.appendingPathComponent("Tic.zip")
+        var preserveStaging = false
+        defer { if !preserveStaging { try? files.removeItem(at: staging) } }
+        let archive = staging.appendingPathComponent("Tico.zip")
         try archiveData.write(to: archive)
         guard await Self.run("/usr/bin/ditto", "-x", "-k", archive.path, staging.path) else { throw Failure.badArchive }
 
-        let new = staging.appendingPathComponent("Tic.app")
+        let new = staging.appendingPathComponent("Tico.app")
         guard let newInfo = Self.info(of: new) else { throw Failure.badArchive }
         let installedID = Self.info(of: app)?["CFBundleIdentifier"] as? String
-        guard let id = newInfo["CFBundleIdentifier"] as? String, id == installedID else { throw Failure.wrongApp }
+        guard installedID == "com.kasvith.tic",
+              let id = newInfo["CFBundleIdentifier"] as? String, id == installedID else { throw Failure.wrongApp }
         let found = newInfo["CFBundleShortVersionString"] as? String ?? "?"
         guard found == version else { throw Failure.wrongVersion(found) }
-        guard await Self.run("/usr/bin/codesign", "--verify", "--strict", new.path) else { throw Failure.badSignature }
+        guard await Self.run("/usr/bin/codesign", "--verify", "--deep", "--strict", new.path) else { throw Failure.badSignature }
 
         // Two renames (old copy aside, new one in), restoring the old copy if the second fails. Plain
         // moves rather than `replaceItemAt`, which carries the old copy's metadata onto the new one.
@@ -78,7 +82,13 @@ struct UpdateInstaller: Sendable {
         do {
             try files.moveItem(at: new, to: app)
         } catch {
-            try? files.moveItem(at: old, to: app)
+            do {
+                try files.moveItem(at: old, to: app)
+            } catch {
+                // Never delete the only remaining copy if restoring it fails as well.
+                preserveStaging = true
+                throw Failure.recoveryRequired(old.path)
+            }
             throw error
         }
     }

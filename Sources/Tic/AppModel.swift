@@ -48,15 +48,20 @@ final class AppModel {
     var recentNotes: [Note] {
         notes.filter { note in
             if noteIDsWithTasks.contains(note.id) { return true }
-            let markdown = note.markdown.trimmingCharacters(in: .whitespacesAndNewlines)
             if note.id == clipboardNoteID {
-                let lines = markdown.components(separatedBy: .newlines)
-                let heading = (lines.first ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "#* _\t"))
-                let rest = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-                if rest.isEmpty && ["", "Untitled Note", "剪贴板便签", "Clipboard Note"].contains(heading) {
-                    return false
+                let source = note.markdown.drop(while: \.isWhitespace)
+                let newline = source.firstIndex(where: \.isNewline)
+                let heading = String(newline.map { source[..<$0] } ?? source[...])
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "#* _\t"))
+                let hasBody = newline.map { index in
+                    source[source.index(after: index)...].contains { !$0.isWhitespace }
+                } ?? false
+                if ["", "Untitled Note", "剪贴板便签", "Clipboard Note"].contains(heading) {
+                    return hasBody
                 }
+                if hasBody { return true }
             }
+            let markdown = note.markdown.trimmingCharacters(in: .whitespacesAndNewlines)
             if !markdown.isEmpty && markdown.range(of: #"^#{1,6}\s*$"#, options: .regularExpression) == nil {
                 return true
             }
@@ -105,8 +110,8 @@ final class AppModel {
         startClipboardMonitor()
         applyLaunchAtLogin(launchAtLogin)   // honor the saved preference (effective when packaged)
         if mcpEnabled { applyMCPEnabled(true) }
-        // This customised build must never replace itself with the upstream project's release.
-        if Bundle.main.object(forInfoDictionaryKey: "TicUpstreamUpdatesEnabled") as? Bool != false {
+        // Only the stable Tico bundle can be replaced by a published Tico release.
+        if Bundle.main.bundleIdentifier == "com.kasvith.tic" {
             updates.start()
         }
     }

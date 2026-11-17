@@ -43,6 +43,10 @@ swift test
 
 项目使用 Swift Package Manager 管理依赖，首次构建需要联网下载依赖。打包产物位于 `dist/development/` 或 `dist/stable/`；使用 `--open` 可在打包后打开应用。也可使用 `open Package.swift` 在 Xcode 中打开项目。
 
+当前源码中的正式版会检查本项目的 GitHub Releases，也可以从菜单栏手动检查；选择安装后会验证下载包的校验和、版本、应用标识与签名。现有 1.0.11 安装包没有启用此功能，首次升级需手动下载安装。由于发行包使用 ad-hoc 签名，校验和与签名完整性检查不能替代 Apple Developer ID 身份验证或公证。
+
+源码中的长剪贴板便签会分段显示和编辑，并按当前段加载图片；翻页不删除其他内容。分段模式下，全选与撤销仅作用于当前段，切换分段会清除该段的撤销历史。
+
 ## 自动构建与发行 CI and releases
 
 推送到 `main`、提交 pull request 或手动运行 CI 时，GitHub Actions 会构建支持 Apple Silicon 和 Intel 的通用应用，并在构建成功后将 ZIP、DMG 和 SHA-256 校验文件保存为该次运行的 **Artifacts**（保留 14 天）。这些是持续集成产物，完整测试结果请查看同一次运行中的 Test 和 Lint 任务。

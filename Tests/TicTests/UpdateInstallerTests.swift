@@ -8,9 +8,16 @@ import Testing
 /// download. Every failure must leave the installed copy exactly as it was.
 @Suite("UpdateInstaller")
 struct UpdateInstallerTests {
+    @Test("downloads Tico release assets from the Tico repository")
+    func assetURLs() {
+        #expect(UpdateInstaller.assetURL("Tico.zip", version: "1.2.3").absoluteString
+                == "https://github.com/code-wgl/Tico/releases/download/v1.2.3/Tico.zip")
+        #expect(UpdateInstaller.assetURL("Tico.zip.sha256", version: "1.2.3").absoluteString
+                == "https://github.com/code-wgl/Tico/releases/download/v1.2.3/Tico.zip.sha256")
+    }
     private struct Fixture {
         let folder: URL
-        var installed: URL { folder.appendingPathComponent("Tic.app") }
+        var installed: URL { folder.appendingPathComponent("Tico.app") }
     }
 
     private func makeFixture(installedVersion: String = "0.8.0") throws -> Fixture {
@@ -38,18 +45,18 @@ struct UpdateInstallerTests {
         if tamper { try Data("#!/bin/sh\necho changed\n".utf8).write(to: executable) }
     }
 
-    /// A release: `Tic.zip` of a fresh bundle plus its `Tic.zip.sha256` (or a wrong one).
+    /// A release: `Tico.zip` of a fresh bundle plus its `Tico.zip.sha256` (or a wrong one).
     private func makeRelease(id: String = "com.kasvith.tic", version: String, tamper: Bool = false, badChecksum: Bool = false) throws -> UpdateInstaller {
         let build = FileManager.default.temporaryDirectory.appendingPathComponent("UpdateInstallerBuild-\(UUID().uuidString)")
-        let app = build.appendingPathComponent("Tic.app")
+        let app = build.appendingPathComponent("Tico.app")
         try makeApp(at: app, id: id, version: version, tamper: tamper)
-        let zipURL = build.appendingPathComponent("Tic.zip")
+        let zipURL = build.appendingPathComponent("Tico.zip")
         try run("/usr/bin/ditto", "-c", "-k", "--keepParent", app.path, zipURL.path)
         let zip = try Data(contentsOf: zipURL)
         let hash = badChecksum ? String(repeating: "0", count: 64) : SHA256.hash(data: zip).map { String(format: "%02x", $0) }.joined()
-        let checksum = Data("\(hash)  Tic.zip\n".utf8)
+        let checksum = Data("\(hash)  Tico.zip\n".utf8)
         return UpdateInstaller(download: { url in
-            url.lastPathComponent == "Tic.zip.sha256" ? checksum : zip
+            url.lastPathComponent == "Tico.zip.sha256" ? checksum : zip
         })
     }
 
@@ -72,7 +79,7 @@ struct UpdateInstallerTests {
         let fixture = try makeFixture()
         try await makeRelease(version: "0.9.0").install(version: "0.9.0", replacing: fixture.installed)
         #expect(installedVersion(fixture) == "0.9.0")
-        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.folder.path) == ["Tic.app"])
+        #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.folder.path) == ["Tico.app"])
     }
 
     @Test("a checksum mismatch stops before touching the installed copy")

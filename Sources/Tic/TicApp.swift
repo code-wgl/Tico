@@ -125,6 +125,31 @@ private struct MenuBarContent: View {
             set: { model.setLaunchAtLogin($0) }
         ))
 
+        if Bundle.main.bundleIdentifier == "com.kasvith.tic" {
+            Button(model.updates.isChecking
+                   ? AppLanguage.text("正在检查更新…", "Checking for Updates…")
+                   : AppLanguage.text("检查更新…", "Check for Updates…")) {
+                Task {
+                    let result = await model.updates.check()
+                    if result == .updateAvailable {
+                        model.openUpdate()
+                    } else {
+                        let alert = NSAlert()
+                        alert.messageText = result == .upToDate
+                            ? AppLanguage.text("已是最新版本", "You're up to date")
+                            : AppLanguage.text("无法检查更新", "Couldn't check for updates")
+                        alert.informativeText = result == .upToDate
+                            ? AppLanguage.text("目前没有可用的新版本。", "No newer release is available.")
+                            : AppLanguage.text("请检查网络后重试。", "Check your connection and try again.")
+                        alert.addButton(withTitle: AppLanguage.text("好", "OK"))
+                        NSApp.activate(ignoringOtherApps: true)
+                        alert.runModal()
+                    }
+                }
+            }
+            .disabled(model.updates.isChecking)
+        }
+
         if let title = model.updates.menuTitle {
             Divider()
             Button(title) { model.openUpdate() }

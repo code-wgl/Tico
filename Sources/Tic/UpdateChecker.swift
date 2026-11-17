@@ -28,6 +28,14 @@ final class UpdateChecker {
         case failed(String)
     }
 
+    enum CheckResult: Equatable {
+        case updateAvailable
+        case upToDate
+        case failed
+    }
+
+    private(set) var isChecking = false
+
     /// A release newer than the running build, if the last check found one.
     private(set) var available: Release?
 
@@ -52,7 +60,7 @@ final class UpdateChecker {
 
     /// The list, not `releases/latest`: one request brings the notes for every version since this one.
     private nonisolated static let releasesURL =
-        URL(string: "https://api.github.com/repos/kasvith/tic/releases?per_page=20")!
+        URL(string: "https://api.github.com/repos/code-wgl/Tico/releases?per_page=20")!
     private static let interval: TimeInterval = 24 * 60 * 60
     private static let notifiedVersionKey = "updateNotifiedVersion"
     private static let seenVersionKey = "updateSeenVersion"
@@ -109,21 +117,26 @@ final class UpdateChecker {
         }
     }
 
-    func check() async {
-        guard let currentVersion else { return }
+    @discardableResult
+    func check() async -> CheckResult {
+        guard let currentVersion, !isChecking else { return .failed }
+        isChecking = true
+        defer { isChecking = false }
         do {
             let release = try await fetch()
             guard Self.isNewer(release.version, than: currentVersion) else {
                 available = nil
                 isUnseen = false
-                return
+                return .upToDate
             }
             available = release
             isUnseen = defaults.string(forKey: Self.seenVersionKey) != release.version
             NSLog("[Tic] update available: v\(release.version)")
             await notifyOnce(release)
+            return .updateAvailable
         } catch {
             NSLog("[Tic] update check failed: \(error)")   // silent for the user, by design
+            return .failed
         }
     }
 
@@ -200,12 +213,17 @@ final class UpdateChecker {
     // MARK: - GitHub
 
     private struct GitHubRelease: Decodable {   // snake_case keys: tag_name, html_url, published_at
+        struct Asset: Decodable {
+            let name: String
+            let state: String
+        }
         let tagName: String
         let htmlUrl: URL
         let body: String?
         let publishedAt: Date?
         let draft: Bool
         let prerelease: Bool
+        let assets: [Asset]
 
         var version: String { tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName }
     }
@@ -213,7 +231,8 @@ final class UpdateChecker {
     nonisolated static func fetchLatest() async throws -> Release {
         var request = URLRequest(url: releasesURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
         return try parse(data)
     }
 
@@ -224,7 +243,14 @@ final class UpdateChecker {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         decoder.dateDecodingStrategy = .iso8601
         let published = try decoder.decode([GitHubRelease].self, from: data)
-            .filter { !$0.draft && !$0.prerelease }
+            .filter { release in
+                let pieces = release.version.split(separator: ".", omittingEmptySubsequences: false)
+                let validVersion = release.tagName.hasPrefix("v") && pieces.count == 3
+                    && pieces.allSatisfy { !$0.isEmpty && $0.allSatisfy { $0 >= "0" && $0 <= "9" } }
+                let assets = Set(release.assets.filter { $0.state == "uploaded" }.map(\.name))
+                return !release.draft && !release.prerelease && validVersion
+                    && assets.isSuperset(of: ["Tico.zip", "Tico.zip.sha256"])
+            }
             .sorted { isNewer($0.version, than: $1.version) }
         guard let latest = published.first else { throw URLError(.cannotParseResponse) }
         return Release(

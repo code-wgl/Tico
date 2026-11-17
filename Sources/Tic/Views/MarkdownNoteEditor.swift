@@ -142,6 +142,10 @@ struct MarkdownNoteEditor: NSViewRepresentable {
     var separateCompletedTasks = false
     var hideCompletedTasks = false
     var trackAnimatedContentHeight = false
+    /// Changing segments invalidates this editor's undo history even when two pages look identical.
+    var segmentGeneration = 0
+    var isSegmented = false
+    var onMarkedTextChange: (Bool) -> Void = { _ in }
     var onFocusHandled: () -> Void = {}
     var onAddTask: () -> Void = {}
     var onPasteImage: (Data, @escaping (String, Data) -> Void) -> Void = { _, _ in }
@@ -186,6 +190,9 @@ struct MarkdownNoteEditor: NSViewRepresentable {
             (view.enclosingScrollView as? MarkdownEditorScrollView)?.reportContentHeight()
         }
         view.onAddTask = { [weak coordinator = context.coordinator] in coordinator?.parent.onAddTask() }
+        view.onMarkedTextChange = { [weak coordinator = context.coordinator] marked in
+            coordinator?.parent.onMarkedTextChange(marked)
+        }
         view.onPasteImage = { [weak coordinator = context.coordinator] data, completion in
             coordinator?.parent.onPasteImage(data, completion)
         }
@@ -203,11 +210,16 @@ struct MarkdownNoteEditor: NSViewRepresentable {
         context.coordinator.parent = self
         styleNoteScroller(scroll, color: textColor)
         guard let view = scroll.documentView as? MarkdownEditingTextView else { return }
+        context.coordinator.prepareSegment(view, generation: segmentGeneration)
         let startSeparating = separateCompletedTasks && !view.separateCompletedTasks
         view.separateCompletedTasks = separateCompletedTasks
         view.hideCompletedTasks = hideCompletedTasks
         view.trackAnimatedContentHeight = trackAnimatedContentHeight
         let current = view.markdownSource()
+        if isSegmented && !view.hasMarkedText() && current != text {
+            // An external change can shift page contents; old text ranges no longer apply.
+            view.undoManager?.removeAllActions()
+        }
         if view.hasMarkedText(), current != text {
             if context.coordinator.pendingExternal == nil {
                 context.coordinator.pendingExternal = (context.coordinator.lastCommittedSource, text)
@@ -246,11 +258,22 @@ extension MarkdownNoteEditor {
         var parent: MarkdownNoteEditor
         var lastFocusRequest = 0
         var lastTaskInsertRequest = 0
+        var lastSegmentGeneration: Int
         var lastCommittedSource: String
         var pendingExternal: (base: String, target: String)?
         private var taskCaretAdjustmentScheduled = false
         private var adjustingTaskCaret = false
-        init(_ parent: MarkdownNoteEditor) { self.parent = parent; self.lastCommittedSource = parent.text }
+        init(_ parent: MarkdownNoteEditor) {
+            self.parent = parent
+            self.lastCommittedSource = parent.text
+            self.lastSegmentGeneration = parent.segmentGeneration
+        }
+
+        func prepareSegment(_ view: MarkdownEditingTextView, generation: Int) {
+            guard lastSegmentGeneration != generation else { return }
+            view.undoManager?.removeAllActions()
+            lastSegmentGeneration = generation
+        }
 
         func focusIfRequested(_ view: MarkdownEditingTextView) {
             if parent.focusRequest == 0 { lastFocusRequest = 0; return }
@@ -273,6 +296,7 @@ extension MarkdownNoteEditor {
             var source = view.markdownSource()
             if let pending = pendingExternal {
                 pendingExternal = nil
+                if parent.isSegmented { view.undoManager?.removeAllActions() }
                 let merged = MarkdownEditingTextView.mergeExternalChange(base: pending.base, target: pending.target, local: source)
                 if merged != source {
                     let selection = view.sourceSelection()
@@ -994,8 +1018,16 @@ final class MarkdownEditingTextView: NSTextView {
     var separatorColor = NSColor.separatorColor
 
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        let wasMarked = hasMarkedText()
         super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        if hasMarkedText() != wasMarked { onMarkedTextChange?(hasMarkedText()) }
         needsDisplay = true
+    }
+
+    override func unmarkText() {
+        let wasMarked = hasMarkedText()
+        super.unmarkText()
+        if wasMarked && !hasMarkedText() { onMarkedTextChange?(false) }
     }
 
     /// Recompute the ranges while drawing so IME composition never leaves a stale background.
@@ -1033,6 +1065,7 @@ final class MarkdownEditingTextView: NSTextView {
     }
 
     var knownImageIDs: Set<String> = []
+    var onMarkedTextChange: ((Bool) -> Void)?
     var onPasteImage: ((Data, @escaping (String, Data) -> Void) -> Void)?
     private var lastImageWidth: CGFloat = 0
 
@@ -1907,7 +1940,7 @@ extension MarkdownEditingTextView {
         setSelectedRange(NSRange(location: start, length: max(0, end - start)))
     }
 
-    static func adjustSelection(_ selection: NSRange, from old: String, to new: String) -> NSRange {
+    nonisolated static func adjustSelection(_ selection: NSRange, from old: String, to new: String) -> NSRange {
         let before = old as NSString, after = new as NSString
         var prefix = 0
         while prefix < min(before.length, after.length), before.character(at: prefix) == after.character(at: prefix) { prefix += 1 }
@@ -1923,7 +1956,7 @@ extension MarkdownEditingTextView {
         return NSRange(location: start, length: max(0, end - start))
     }
 
-    static func mergeExternalChange(base: String, target: String, local: String) -> String {
+    nonisolated static func mergeExternalChange(base: String, target: String, local: String) -> String {
         guard base != target else { return local }
         let before = base as NSString, after = target as NSString
         var prefix = 0
