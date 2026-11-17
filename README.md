@@ -26,7 +26,7 @@ Tico is a native macOS sticky-note app for keeping notes and tasks close at hand
 
 ## 安装 Installation
 
-下载 [Tico 1.0.11 安装映像](https://github.com/code-wgl/Tico/releases/download/v1.0.11/Tico-v1.0.11.dmg)，打开后将 Tico 拖入 Applications 文件夹。也可以在 [GitHub Releases](https://github.com/code-wgl/Tico/releases) 查看其他下载文件和发行说明，或按下方步骤从源码构建。
+下载 [Tico 1.0.12 安装映像](https://github.com/code-wgl/Tico/releases/download/v1.0.12/Tico-v1.0.12.dmg)，打开后将 Tico 拖入 Applications 文件夹。也可以在 [GitHub Releases](https://github.com/code-wgl/Tico/releases) 查看其他下载文件和发行说明，或按下方步骤从源码构建。
 
 本项目的本地打包脚本使用 ad-hoc 签名；这种签名不等同于 Apple Developer ID 签名或公证，其他 Mac 的首次打开体验可能受到 macOS 安全设置影响。
 
@@ -43,15 +43,15 @@ swift test
 
 项目使用 Swift Package Manager 管理依赖，首次构建需要联网下载依赖。打包产物位于 `dist/development/` 或 `dist/stable/`；使用 `--open` 可在打包后打开应用。也可使用 `open Package.swift` 在 Xcode 中打开项目。
 
-当前源码中的正式版会检查本项目的 GitHub Releases，也可以从菜单栏手动检查；选择安装后会验证下载包的校验和、版本、应用标识与签名。现有 1.0.11 安装包没有启用此功能，首次升级需手动下载安装。由于发行包使用 ad-hoc 签名，校验和与签名完整性检查不能替代 Apple Developer ID 身份验证或公证。
+1.0.12 正式版会检查本项目的 GitHub Releases，也可以从菜单栏手动检查；选择安装后会验证下载包的校验和、版本、应用标识与签名。现有 1.0.11 安装包没有启用此功能，首次升级需手动下载安装。由于发行包使用 ad-hoc 签名，校验和与签名完整性检查不能替代 Apple Developer ID 身份验证或公证。
 
-源码中的长剪贴板便签会分段显示和编辑，并按当前段加载图片；翻页不删除其他内容。分段模式下，全选与撤销仅作用于当前段，切换分段或大段输入后自动重新分段会清除当前撤销历史。
+1.0.12 中的长剪贴板便签会分段显示和编辑，并按当前段加载图片；翻页不删除其他内容。分段模式下，全选与撤销仅作用于当前段，切换分段或大段输入后自动重新分段会清除当前撤销历史。
 
 ## 自动构建与发行 CI and releases
 
 推送到 `main`、提交 pull request 或手动运行 CI 时，GitHub Actions 会构建支持 Apple Silicon 和 Intel 的通用应用，并在构建成功后将 ZIP、DMG 和 SHA-256 校验文件保存为该次运行的 **Artifacts**（保留 14 天）。这些是持续集成产物，完整测试结果请查看同一次运行中的 Test 和 Lint 任务。
 
-推送形如 `v1.0.11` 的版本标签会启动正式发行流程：先运行测试，通过后构建、校验并发布到 GitHub Releases。发布包目前采用 ad-hoc 签名，未经过 Apple 公证。
+推送形如 `v1.0.12` 的版本标签会启动正式发行流程：先运行测试，通过后构建、校验并发布到 GitHub Releases。发布包目前采用 ad-hoc 签名，未经过 Apple 公证。
 
 > 兼容已有用户数据：正式版保留原 Tic 的应用标识和 `~/Library/Application Support/Tic/` 数据目录；开发版使用独立目录。备份和迁移时请注意保护自己的便签数据。
 
