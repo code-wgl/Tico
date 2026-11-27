@@ -83,7 +83,8 @@ struct SyncTests {
         try await a.dbQueue.write { db in
             try task.insert(db)
             try db.execute(sql: "INSERT INTO taskImage (taskId,data,updatedAt) VALUES (?,?,?)", arguments: [task.id, Data([3, 4]), Date()])
-            try db.execute(sql: "INSERT INTO clipboardEntry (id,noteId,text,imageData,createdAt,thumbnail) VALUES (?,?,?,?,?,?)", arguments: [entry, note.id, "synthetic clipboard", Data([5]), Date(), Data([6])])
+            try db.execute(sql: "INSERT INTO clipboardEntry (id,noteId,text,imageData,createdAt,thumbnail) VALUES (?,?,?,?,?,?)",
+                           arguments: [entry, note.id, "synthetic clipboard", Data([5]), Date(), Data([6])])
         }
         try await a.syncCaptureLocalChanges()
         let ops = try await a.syncPendingOperations()

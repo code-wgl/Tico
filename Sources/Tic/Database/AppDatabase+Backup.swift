@@ -94,7 +94,10 @@ extension AppDatabase {
                         let image: Data? = entry["imageData"]
                         let thumbnail: Data? = entry["thumbnail"]
                         let created: Date = entry["createdAt"]
-                        try output.execute(sql: "INSERT INTO clipboardEntry (id,noteId,text,imageData,thumbnail,createdAt) VALUES (?,?,?,?,?,?)", arguments: [UUID(), note.id, text, image, thumbnail, created])
+                        try output.execute(
+                            sql: "INSERT INTO clipboardEntry (id,noteId,text,imageData,thumbnail,createdAt) VALUES (?,?,?,?,?,?)",
+                            arguments: [UUID(), note.id, text, image, thumbnail, created]
+                        )
                     }
                     notes.append(note)
                 }

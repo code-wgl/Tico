@@ -434,11 +434,7 @@ extension AppModel {
         do {
             if !atStartup {
                 clipboardPaused = true
-                switch await drainClipboardWrites() {
-                case .completed: break
-                case .failed: throw ClipboardDrainFailure.failed
-                case .timedOut: throw ClipboardDrainFailure.timedOut
-                }
+                try await prepareClipboardForUpdate()
                 await windows.flushPendingWrites()
             }
             let defaults = UserDefaults.standard
@@ -453,30 +449,7 @@ extension AppModel {
                 clipboardPaused = false
             }
             try await client.verifyAuthentication()
-            let local = try await database.syncOperationIDs()
-            let localIDs = Set(local)
-            let names = try await client.list().filter { $0.hasPrefix("sync-op-") && $0.hasSuffix(".json") }
-            var remote: [SyncOperation] = []
-            var remoteIDs = Set<UUID>()
-            for name in names {
-                let rawID = String(name.dropFirst("sync-op-".count).dropLast(".json".count))
-                guard let id = UUID(uuidString: rawID), remoteIDs.insert(id).inserted else { throw SyncError.invalid }
-                let data = try await client.download(name: name)
-                if localIDs.contains(id) {
-                    guard try await database.syncOperationBytes(id: id) == data else { throw SyncError.invalid }
-                } else {
-                    let op = try JSONDecoder().decode(SyncOperation.self, from: data)
-                    guard op.id == id else { throw SyncError.invalid }
-                    remote.append(op)
-                }
-            }
-            for id in local {
-                if !remoteIDs.contains(id) {
-                    let data = try await database.syncOperationBytes(id: id)
-                    try await client.upload(name: "sync-op-\(id.uuidString).json", data: data)
-                }
-                try await database.syncMarkUploaded(ids: [id])
-            }
+            let remote = try await exchangeCloudOperations(using: client)
             // This check and the synchronous transaction run together on the main actor.
             // No note can be opened between the check and the write.
             guard windows.openCount == 0 else {
@@ -485,11 +458,7 @@ extension AppModel {
             }
             if !atStartup {
                 clipboardPaused = true
-                switch await drainClipboardWrites() {
-                case .completed: break
-                case .failed: throw ClipboardDrainFailure.failed
-                case .timedOut: throw ClipboardDrainFailure.timedOut
-                }
+                try await prepareClipboardForUpdate()
                 await windows.flushPendingWrites()
                 try await database.syncCaptureLocalChanges()
             }
@@ -522,6 +491,34 @@ extension AppModel {
             syncStatus = error.localizedDescription
             NSLog("[Tic] cloud sync failed: \(error)")
         }
+    }
+
+    private func exchangeCloudOperations(using client: WebDAVClient) async throws -> [SyncOperation] {
+        let local = try await database.syncOperationIDs()
+        let localIDs = Set(local)
+        let names = try await client.list().filter { $0.hasPrefix("sync-op-") && $0.hasSuffix(".json") }
+        var remote: [SyncOperation] = []
+        var remoteIDs = Set<UUID>()
+        for name in names {
+            let rawID = String(name.dropFirst("sync-op-".count).dropLast(".json".count))
+            guard let id = UUID(uuidString: rawID), remoteIDs.insert(id).inserted else { throw SyncError.invalid }
+            let data = try await client.download(name: name)
+            if localIDs.contains(id) {
+                guard try await database.syncOperationBytes(id: id) == data else { throw SyncError.invalid }
+            } else {
+                let op = try JSONDecoder().decode(SyncOperation.self, from: data)
+                guard op.id == id else { throw SyncError.invalid }
+                remote.append(op)
+            }
+        }
+        for id in local {
+            if !remoteIDs.contains(id) {
+                let data = try await database.syncOperationBytes(id: id)
+                try await client.upload(name: "sync-op-\(id.uuidString).json", data: data)
+            }
+            try await database.syncMarkUploaded(ids: [id])
+        }
+        return remote
     }
 }
 

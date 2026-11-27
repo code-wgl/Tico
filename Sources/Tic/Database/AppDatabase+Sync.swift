@@ -83,7 +83,10 @@ extension AppDatabase {
         archive.inlineImages.sort { $0.id < $1.id }
         archive.taskImages.sort { $0.taskId.uuidString < $1.taskId.uuidString }
         let rows = try Row.fetchAll(db, sql: "SELECT id, noteId, text, imageData, createdAt, thumbnail FROM clipboardEntry WHERE noteId = ? ORDER BY id", arguments: [noteID])
-        let entries = rows.map { row in SyncClipboardEntry(id: row["id"], noteId: row["noteId"], text: row["text"], imageData: row["imageData"], createdAt: row["createdAt"], thumbnail: row["thumbnail"]) }
+        let entries = rows.map { row in
+            SyncClipboardEntry(id: row["id"], noteId: row["noteId"], text: row["text"],
+                               imageData: row["imageData"], createdAt: row["createdAt"], thumbnail: row["thumbnail"])
+        }
         return (archive, entries)
     }
 
@@ -116,8 +119,10 @@ extension AppDatabase {
                 if old?.1 == fingerprint { continue }
                 let op = SyncOperation(format: "tico-sync", version: 1, id: UUID(), noteID: noteID, parentID: old?.0, archive: archive, clipboardEntries: entries)
                 let data = try Self.syncEncode(op)
-                try db.execute(sql: "INSERT INTO ticoSyncOperation (id,noteID,parentID,data,uploaded) VALUES (?,?,?,?,0)", arguments: [op.id.uuidString, noteID.uuidString, op.parentID?.uuidString, data])
-                try db.execute(sql: "INSERT OR REPLACE INTO ticoSyncHead (noteID,operationID,fingerprint,deleted) VALUES (?,?,?,?)", arguments: [noteID.uuidString, op.id.uuidString, fingerprint, archive == nil])
+                try db.execute(sql: "INSERT INTO ticoSyncOperation (id,noteID,parentID,data,uploaded) VALUES (?,?,?,?,0)",
+                               arguments: [op.id.uuidString, noteID.uuidString, op.parentID?.uuidString, data])
+                try db.execute(sql: "INSERT OR REPLACE INTO ticoSyncHead (noteID,operationID,fingerprint,deleted) VALUES (?,?,?,?)",
+                               arguments: [noteID.uuidString, op.id.uuidString, fingerprint, archive == nil])
             }
         }
     }
@@ -264,14 +269,16 @@ extension AppDatabase {
                 guard existing == bytes else { throw SyncError.invalid }
                 continue
             }
-            try db.execute(sql: "INSERT INTO ticoSyncOperation (id,noteID,parentID,data,uploaded) VALUES (?,?,?,?,1)", arguments: [op.id.uuidString, op.noteID.uuidString, op.parentID?.uuidString, bytes])
+            try db.execute(sql: "INSERT INTO ticoSyncOperation (id,noteID,parentID,data,uploaded) VALUES (?,?,?,?,1)",
+                           arguments: [op.id.uuidString, op.noteID.uuidString, op.parentID?.uuidString, bytes])
         }
     }
 
     private static func syncSetHead(_ op: SyncOperation, db: Database) throws {
         try syncReplace(op, db: db)
         let fingerprint = try syncFingerprint(op.archive, op.clipboardEntries)
-        try db.execute(sql: "INSERT OR REPLACE INTO ticoSyncHead (noteID,operationID,fingerprint,deleted) VALUES (?,?,?,?)", arguments: [op.noteID.uuidString, op.id.uuidString, fingerprint, op.archive == nil])
+        try db.execute(sql: "INSERT OR REPLACE INTO ticoSyncHead (noteID,operationID,fingerprint,deleted) VALUES (?,?,?,?)",
+                       arguments: [op.noteID.uuidString, op.id.uuidString, fingerprint, op.archive == nil])
     }
 
     private static func syncApply(_ operations: [SyncOperation], db: Database) throws {
@@ -337,18 +344,22 @@ extension AppDatabase {
                 copy.title += AppLanguage.text("（同步冲突）", " (Sync conflict)")
                 try copy.update(db)
                 for entry in losingOp.clipboardEntries {
-                    try db.execute(sql: "INSERT INTO clipboardEntry (id,noteId,text,imageData,createdAt,thumbnail) VALUES (?,?,?,?,?,?)", arguments: [UUID(), copy.id, entry.text, entry.imageData, entry.createdAt, entry.thumbnail])
+                    try db.execute(sql: "INSERT INTO clipboardEntry (id,noteId,text,imageData,createdAt,thumbnail) VALUES (?,?,?,?,?,?)",
+                                   arguments: [UUID(), copy.id, entry.text, entry.imageData, entry.createdAt, entry.thumbnail])
                 }
                 let (snapshot, entries) = try Self.syncArchive(copy.id, db: db)
                 let conflictOp = SyncOperation(format: "tico-sync", version: 1, id: UUID(), noteID: copy.id, parentID: nil, archive: snapshot, clipboardEntries: entries)
-                try db.execute(sql: "INSERT INTO ticoSyncOperation (id,noteID,parentID,data,uploaded) VALUES (?,?,?,?,0)", arguments: [conflictOp.id.uuidString, copy.id.uuidString, nil, try Self.syncEncode(conflictOp)])
-                try db.execute(sql: "INSERT INTO ticoSyncHead (noteID,operationID,fingerprint,deleted) VALUES (?,?,?,0)", arguments: [copy.id.uuidString, conflictOp.id.uuidString, try Self.syncFingerprint(snapshot, entries)])
+                try db.execute(sql: "INSERT INTO ticoSyncOperation (id,noteID,parentID,data,uploaded) VALUES (?,?,?,?,0)",
+                               arguments: [conflictOp.id.uuidString, copy.id.uuidString, nil, try Self.syncEncode(conflictOp)])
+                try db.execute(sql: "INSERT INTO ticoSyncHead (noteID,operationID,fingerprint,deleted) VALUES (?,?,?,0)",
+                               arguments: [copy.id.uuidString, conflictOp.id.uuidString, try Self.syncFingerprint(snapshot, entries)])
                 copies.append(copy.id)
             }
             let chosenOp = try Self.syncLoad(chosen, incoming: incoming, db: db)
             var merge = SyncOperation(format: "tico-sync", version: 2, id: UUID(), noteID: noteID, parentID: nil, archive: chosenOp.archive, clipboardEntries: chosenOp.clipboardEntries)
             merge.mergeParentIDs = leaves.map(\.id).sorted { $0.uuidString < $1.uuidString }
-            try db.execute(sql: "INSERT INTO ticoSyncOperation (id,noteID,parentID,data,uploaded) VALUES (?,?,?,?,0)", arguments: [merge.id.uuidString, noteID.uuidString, nil, try Self.syncEncode(merge)])
+            try db.execute(sql: "INSERT INTO ticoSyncOperation (id,noteID,parentID,data,uploaded) VALUES (?,?,?,?,0)",
+                           arguments: [merge.id.uuidString, noteID.uuidString, nil, try Self.syncEncode(merge)])
             try Self.syncSetHead(merge, db: db)
             return copies
     }
@@ -383,10 +394,12 @@ extension AppDatabase {
             try db.execute(sql: "INSERT INTO noteInlineImage (id,noteId,data,thumbnail) VALUES (?,?,?,?)", arguments: [image.id, op.noteID, image.data, image.thumbnail])
         }
         for image in archive.taskImages {
-            try db.execute(sql: "INSERT INTO taskImage (taskId,data,cropX,cropY,cropW,cropH,updatedAt) VALUES (?,?,?,?,?,?,?)", arguments: [image.taskId, image.data, image.cropX, image.cropY, image.cropW, image.cropH, Date()])
+            try db.execute(sql: "INSERT INTO taskImage (taskId,data,cropX,cropY,cropW,cropH,updatedAt) VALUES (?,?,?,?,?,?,?)",
+                           arguments: [image.taskId, image.data, image.cropX, image.cropY, image.cropW, image.cropH, Date()])
         }
         for entry in op.clipboardEntries {
-            try db.execute(sql: "INSERT INTO clipboardEntry (id,noteId,text,imageData,createdAt,thumbnail) VALUES (?,?,?,?,?,?)", arguments: [entry.id, entry.noteId, entry.text, entry.imageData, entry.createdAt, entry.thumbnail])
+            try db.execute(sql: "INSERT INTO clipboardEntry (id,noteId,text,imageData,createdAt,thumbnail) VALUES (?,?,?,?,?,?)",
+                           arguments: [entry.id, entry.noteId, entry.text, entry.imageData, entry.createdAt, entry.thumbnail])
         }
     }
 }

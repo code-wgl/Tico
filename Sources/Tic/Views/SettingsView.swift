@@ -163,7 +163,10 @@ struct SettingsView: View {
                 .onChange(of: automaticBackupEnabled) { _, enabled in
                     if enabled { model.requestAutomaticBackup() }
                 }
-            Text(AppLanguage.text("保留最近 7 份，存放在 Tico 应用数据的 Automatic Backups 文件夹；文件未加密。", "Keeps the latest 7 copies in the Automatic Backups folder in Tico's application data. Files are not encrypted."))
+            Text(AppLanguage.text(
+                "保留最近 7 份，存放在 Tico 应用数据的 Automatic Backups 文件夹；文件未加密。",
+                "Keeps the latest 7 copies in the Automatic Backups folder in Tico's application data. Files are not encrypted."
+            ))
                 .font(.caption).foregroundStyle(.secondary)
             if let status = model.automaticBackupStatus {
                 Text(status).font(.caption).foregroundStyle(.secondary)
