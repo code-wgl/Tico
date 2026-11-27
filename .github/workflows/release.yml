@@ -68,6 +68,8 @@ jobs:
           generate_release_notes: true
           body: |
             Universal macOS build for Apple Silicon and Intel. This build is ad-hoc signed and is not notarized by Apple. See the README for installation and data compatibility details.
+
+            WebDAV sync is experimental and disabled by default. It has been tested with a simulated server, not with a live WebDAV service or two physical devices. Close notes or restart the app to receive remote changes. Backups and server-side files are not end-to-end encrypted.
           files: |
             dist/Tico-${{ github.ref_name }}.dmg
             dist/Tico.zip
