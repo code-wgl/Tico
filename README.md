@@ -26,7 +26,7 @@ Tico is a native macOS sticky-note app for keeping notes and tasks close at hand
 
 ## 安装 Installation
 
-下载 [Tico 1.0.12 安装映像](https://github.com/code-wgl/Tico/releases/download/v1.0.12/Tico-v1.0.12.dmg)，打开后将 Tico 拖入 Applications 文件夹。也可以在 [GitHub Releases](https://github.com/code-wgl/Tico/releases) 查看其他下载文件和发行说明，或按下方步骤从源码构建。
+下载 [Tico 1.0.13 安装映像](https://github.com/code-wgl/Tico/releases/download/v1.0.13/Tico-v1.0.13.dmg)，打开后将 Tico 拖入 Applications 文件夹。也可以在 [GitHub Releases](https://github.com/code-wgl/Tico/releases) 查看其他下载文件和发行说明，或按下方步骤从源码构建。
 
 本项目的本地打包脚本使用 ad-hoc 签名；这种签名不等同于 Apple Developer ID 签名或公证，其他 Mac 的首次打开体验可能受到 macOS 安全设置影响。
 
@@ -68,7 +68,7 @@ swift test
 
 可在设置中开启每日自动备份，最近 7 份保存在应用数据目录的 `Automatic Backups` 文件夹。自动备份只清理自己生成的旧备份，不删除手动导出的文件。
 
-云同步目前为实验功能，尚未完成真实 WebDAV 服务及双设备端到端验证。在设置的“云同步”中，可填写私人 WebDAV 目录的 HTTPS 地址、账号和密码，验证连接后再开启同步。密码保存在 macOS 钥匙串。启用后应用启动时及运行期间定期同步，也可手动同步。为保护尚在编辑的内容，接收云端修改需要关闭所有便签或重新启动应用；不同设备并发修改同一便签时会暂停并提示选择版本，其他有内容的版本保留为副本。请先保留本地备份。
+云同步默认为关闭的实验功能，尚未完成真实 WebDAV 服务及双设备端到端验证。在设置的“云同步”中，可填写私人 WebDAV 目录的 HTTPS 地址、账号和密码，验证连接后再开启同步。密码保存在 macOS 钥匙串。启用后应用启动时及运行期间定期同步，也可手动同步。为保护尚在编辑的内容，接收云端修改需要关闭所有便签或重新启动应用；不同设备并发修改同一便签时会暂停并提示选择版本，其他有内容的版本保留为副本。请先保留本地备份。
 
 所有参与同步的设备应使用支持该同步格式的相同新版 Tico；较旧的测试版本无法处理合并后的冲突记录。首次连接使用新设备和专用测试目录验证后，再用于重要数据。
 
