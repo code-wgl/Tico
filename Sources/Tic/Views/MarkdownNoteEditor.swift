@@ -1310,7 +1310,12 @@ final class MarkdownEditingTextView: NSTextView {
             }
             NSCursor.arrow.set()
         } else {
+            let completed = taskMarkers.first { $0.range == pending.range }?.checked == false
+            let markerRect = taskMarkerRect(pending.range)
             toggleMarkdownTask(pending.range)
+            if completed, let rect = markerRect {
+                TaskCompletionBurst.show(in: self, at: NSPoint(x: rect.midX, y: rect.midY))
+            }
         }
     }
 

@@ -36,6 +36,7 @@ struct TaskRowView: View {
     @State private var draft: String
     @State private var editing = false
     @State private var hovering = false
+    @State private var completionBurst = 0
     // Memoises the parsed Markdown so it isn't re-parsed on every re-render (e.g. each frame of a
     // drag), which otherwise makes reordering feel laggy.
     @State private var renderCache = MarkdownRenderCache()
@@ -117,11 +118,19 @@ struct TaskRowView: View {
 
     private var taskRow: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Button(action: onToggle) {
+            Button {
+                if !task.isDone { completionBurst += 1 }
+                onToggle()
+            } label: {
                 Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 16, weight: .regular))
                     .foregroundStyle(task.isDone ? theme.checkbox : theme.secondary)
                     .contentTransition(.symbolEffect(.replace))
+                    .overlay {
+                        TaskCompletionBurstAnchor(trigger: completionBurst)
+                            .frame(width: 16, height: 16)
+                            .allowsHitTesting(false)
+                    }
             }
             .buttonStyle(.plain)
 
