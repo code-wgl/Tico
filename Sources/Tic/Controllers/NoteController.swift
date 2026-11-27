@@ -200,6 +200,12 @@ final class NoteController {
 
     func flushPendingMarkdown() async { await markdownSave?.value }
 
+    func flushPendingWrites() async {
+        await markdownSave?.value
+        await behaviorSave?.value
+        await opacitySave?.value
+    }
+
     func restoreClipboardTitle() async {
         await markdownSave?.value
         if let restored = ClipboardContent.restoringTitle(in: lastMarkdownSubmitted) {

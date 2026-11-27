@@ -1025,6 +1025,6 @@ extension NoteWindowManager {
         let frameSaves = Array(pendingFrameSaves.values)
         let openControllers = Array(controllers.values)
         for task in frameSaves { await task.value }
-        for controller in openControllers { await controller.flushPendingMarkdown() }
+        for controller in openControllers { await controller.flushPendingWrites() }
     }
 }

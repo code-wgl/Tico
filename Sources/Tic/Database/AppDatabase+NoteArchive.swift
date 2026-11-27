@@ -30,22 +30,27 @@ enum NoteArchiveError: LocalizedError {
 
 extension AppDatabase {
     func exportNote(id: UUID) async throws -> NoteArchive {
-        try await dbQueue.read { db in
-            guard let note = try Note.filter(Note.Columns.id == id).fetchOne(db) else { throw NoteArchiveError.invalid }
-            let tasks = try TaskItem.filter(TaskItem.Columns.noteId == id).order(TaskItem.Columns.sortIndex).fetchAll(db)
-            let inlineRows = try Row.fetchAll(db, sql: "SELECT id, data, thumbnail FROM noteInlineImage WHERE noteId = ?", arguments: [id])
-            let inline = inlineRows.map { NoteArchive.InlineImage(id: $0["id"], data: $0["data"], thumbnail: $0["thumbnail"]) }
-            let source = note.markdown as NSString
-            let expression = try NSRegularExpression(pattern: #"!\[[^\]\n]*\]\(tic-image://([0-9A-Fa-f-]+)\)"#)
-            let ids = Set(expression.matches(in: note.markdown, range: NSRange(location: 0, length: source.length)).map { source.substring(with: $0.range(at: 1)) })
-            guard ids.isSubset(of: Set(inline.map(\.id))) else { throw NoteArchiveError.missingImage }
-            let imageRows = try Row.fetchAll(db, sql: "SELECT i.taskId, i.data, i.cropX, i.cropY, i.cropW, i.cropH FROM taskImage i JOIN task t ON t.id = i.taskId WHERE t.noteId = ?", arguments: [id])
-            let images = imageRows.map { NoteArchive.TaskImage(taskId: $0["taskId"], data: $0["data"], cropX: $0["cropX"], cropY: $0["cropY"], cropW: $0["cropW"], cropH: $0["cropH"]) }
-            return NoteArchive(note: note, tasks: tasks, inlineImages: inline, taskImages: images)
-        }
+        try await dbQueue.read { db in try Self.exportNote(id: id, from: db) }
     }
 
+    static func exportNote(id: UUID, from db: Database) throws -> NoteArchive {
+        guard let note = try Note.filter(Note.Columns.id == id).fetchOne(db) else { throw NoteArchiveError.invalid }
+        let tasks = try TaskItem.filter(TaskItem.Columns.noteId == id).order(TaskItem.Columns.sortIndex).fetchAll(db)
+        let inlineRows = try Row.fetchAll(db, sql: "SELECT id, data, thumbnail FROM noteInlineImage WHERE noteId = ?", arguments: [id])
+        let inline = inlineRows.map { NoteArchive.InlineImage(id: $0["id"], data: $0["data"], thumbnail: $0["thumbnail"]) }
+        let source = note.markdown as NSString
+        let expression = try NSRegularExpression(pattern: #"!\[[^\]\n]*\]\(tic-image://([0-9A-Fa-f-]+)\)"#)
+        let ids = Set(expression.matches(in: note.markdown, range: NSRange(location: 0, length: source.length)).map { source.substring(with: $0.range(at: 1)) })
+        guard ids.isSubset(of: Set(inline.map(\.id))) else { throw NoteArchiveError.missingImage }
+        let imageRows = try Row.fetchAll(db, sql: "SELECT i.taskId, i.data, i.cropX, i.cropY, i.cropW, i.cropH FROM taskImage i JOIN task t ON t.id = i.taskId WHERE t.noteId = ?", arguments: [id])
+        let images = imageRows.map { NoteArchive.TaskImage(taskId: $0["taskId"], data: $0["data"], cropX: $0["cropX"], cropY: $0["cropY"], cropW: $0["cropW"], cropH: $0["cropH"]) }
+        return NoteArchive(note: note, tasks: tasks, inlineImages: inline, taskImages: images)
+    }
     func importNote(_ archive: NoteArchive) async throws -> Note {
+        try await dbQueue.write { db in try Self.importNote(archive, into: db) }
+    }
+
+    static func importNote(_ archive: NoteArchive, into db: Database, preserveState: Bool = false) throws -> Note {
         guard archive.format == "tic-note" else { throw NoteArchiveError.invalid }
         guard archive.version == 1 else { throw NoteArchiveError.unsupported }
         guard Set(archive.tasks.map(\.id)).count == archive.tasks.count,
@@ -55,39 +60,39 @@ extension AppDatabase {
         let expression = try NSRegularExpression(pattern: #"!\[[^\]\n]*\]\(tic-image://([0-9A-Fa-f-]+)\)"#)
         let referenced = Set(expression.matches(in: archive.note.markdown, range: NSRange(location: 0, length: markdown.length)).map { markdown.substring(with: $0.range(at: 1)) })
         guard referenced.isSubset(of: Set(archive.inlineImages.map(\.id))) else { throw NoteArchiveError.missingImage }
-        return try await dbQueue.write { db in
-            var note = archive.note
-            let originalID = note.id
-            note.id = UUID()
-            note.sortIndex = (try Int.fetchOne(db, sql: "SELECT MAX(sortIndex) FROM note") ?? -1) + 1
+        var note = archive.note
+        let originalID = note.id
+        note.id = UUID()
+        note.sortIndex = (try Int.fetchOne(db, sql: "SELECT MAX(sortIndex) FROM note") ?? -1) + 1
+        if !preserveState {
             note.isOpen = true
             note.isCollapsed = false
             note.createdAt = Date()
             note.updatedAt = Date()
-            var inlineIDs: [String: String] = [:]
-            for image in archive.inlineImages { inlineIDs[image.id] = UUID().uuidString }
-            for (old, new) in inlineIDs { note.markdown = note.markdown.replacingOccurrences(of: "tic-image://\(old)", with: "tic-image://\(new)") }
-            try note.insert(db)
-            var taskIDs: [UUID: UUID] = [:]
-            for (index, original) in archive.tasks.enumerated() {
-                guard original.noteId == originalID else { throw NoteArchiveError.invalid }
-                var task = original
-                task.id = UUID(); task.noteId = note.id; task.sortIndex = index
-                taskIDs[original.id] = task.id
-                try task.insert(db)
-            }
-            for image in archive.inlineImages {
-                guard let id = inlineIDs[image.id] else { throw NoteArchiveError.invalid }
-                try db.execute(sql: "INSERT INTO noteInlineImage (id,noteId,data,thumbnail) VALUES (?,?,?,?)", arguments: [id, note.id, image.data, image.thumbnail])
-            }
-            for image in archive.taskImages {
-                guard let id = taskIDs[image.taskId] else { throw NoteArchiveError.invalid }
-                try db.execute(
-                    sql: "INSERT INTO taskImage (taskId,data,cropX,cropY,cropW,cropH,updatedAt) VALUES (?,?,?,?,?,?,?)",
-                    arguments: [id, image.data, image.cropX, image.cropY, image.cropW, image.cropH, Date()]
-                )
-            }
-            return note
         }
+        var inlineIDs: [String: String] = [:]
+        for image in archive.inlineImages { inlineIDs[image.id] = UUID().uuidString }
+        for (old, new) in inlineIDs { note.markdown = note.markdown.replacingOccurrences(of: "tic-image://\(old)", with: "tic-image://\(new)") }
+        try note.insert(db)
+        var taskIDs: [UUID: UUID] = [:]
+        for (index, original) in archive.tasks.enumerated() {
+            guard original.noteId == originalID else { throw NoteArchiveError.invalid }
+            var task = original
+            task.id = UUID(); task.noteId = note.id; task.sortIndex = index
+            taskIDs[original.id] = task.id
+            try task.insert(db)
+        }
+        for image in archive.inlineImages {
+            guard let id = inlineIDs[image.id] else { throw NoteArchiveError.invalid }
+            try db.execute(sql: "INSERT INTO noteInlineImage (id,noteId,data,thumbnail) VALUES (?,?,?,?)", arguments: [id, note.id, image.data, image.thumbnail])
+        }
+        for image in archive.taskImages {
+            guard let id = taskIDs[image.taskId] else { throw NoteArchiveError.invalid }
+            try db.execute(
+                sql: "INSERT INTO taskImage (taskId,data,cropX,cropY,cropW,cropH,updatedAt) VALUES (?,?,?,?,?,?,?)",
+                arguments: [id, image.data, image.cropX, image.cropY, image.cropW, image.cropH, Date()]
+            )
+        }
+        return note
     }
 }

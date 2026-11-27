@@ -42,6 +42,15 @@ final class AppModel {
     private(set) var mcpConnections = 0
     /// Saved launch-at-login preference, reflected in the menu.
     private(set) var launchAtLogin: Bool = UserDefaults.standard.bool(forKey: AppModel.launchAtLoginKey)
+    private(set) var syncStatus: String?
+    private(set) var syncConflicts: [SyncConflict] = []
+    @ObservationIgnored private var pendingSyncOperations: [SyncOperation] = []
+    @ObservationIgnored private var pendingSyncEndpoint: String?
+    @ObservationIgnored private var cloudSyncRunning = false
+    @ObservationIgnored private var cloudSyncTimer: Timer?
+    @ObservationIgnored private var automaticBackupRunning = false
+    @ObservationIgnored private var automaticBackup: AutoBackupService?
+    private(set) var automaticBackupStatus: String?
 
     /// All saved notes (ascending `sortIndex`, i.e. creation order) — drives the menu bar list.
     /// Stays in sync as notes are created, renamed, or deleted.
@@ -106,10 +115,20 @@ final class AppModel {
 
     /// Run once after launch: open saved note panels, then start streaming the notes list.
     func bootstrap() async {
+        if UserDefaults.standard.bool(forKey: "webdavEnabled") {
+            await performCloudSync(atStartup: true)
+        }
         await windows.restoreAll()
         startObservingNotes()
         await prepareClipboardNote()
         startClipboardMonitor()
+        cloudSyncTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.performCloudSync(atStartup: false)
+                await self?.runAutomaticBackup()
+            }
+        }
+        Task { await runAutomaticBackup() }
         applyLaunchAtLogin(launchAtLogin)   // honor the saved preference (effective when packaged)
         if mcpEnabled { applyMCPEnabled(true) }
         // Only the stable Tico bundle can be replaced by a published Tico release.
@@ -247,8 +266,8 @@ final class AppModel {
         case failed, timedOut
         var errorDescription: String? {
             switch self {
-            case .failed: AppLanguage.text("剪贴板内容保存失败，更新已取消。", "Clipboard saving failed; the update was cancelled.")
-            case .timedOut: AppLanguage.text("剪贴板内容仍在保存，请稍后重试更新。", "Clipboard items are still saving. Try updating again shortly.")
+            case .failed: AppLanguage.text("剪贴板内容保存失败，操作已取消。", "Clipboard saving failed; the operation was cancelled.")
+            case .timedOut: AppLanguage.text("剪贴板内容仍在保存，请稍后重试。", "Clipboard items are still saving. Try again shortly.")
             }
         }
     }
@@ -343,6 +362,210 @@ final class AppModel {
         Task { await windows.deleteNote(note) }
     }
 
+}
+
+// WebDAV sync uses immutable revision files. Remote writes are applied only while no note
+// window is open, so an editor's uncommitted text can never be replaced by a cloud revision.
+extension AppModel {
+    func resolveCloudConflict() {
+        guard let conflict = syncConflicts.first, !cloudSyncRunning, !automaticBackupRunning else { return }
+        guard windows.openCount == 0 else {
+            syncStatus = AppLanguage.text("请先关闭所有便签，再解决同步冲突。", "Close all notes before resolving a sync conflict.")
+            return
+        }
+        let defaults = UserDefaults.standard
+        let endpoint = (defaults.string(forKey: "webdavURL") ?? "") + "\n" + (defaults.string(forKey: "webdavUsername") ?? "")
+        guard endpoint == pendingSyncEndpoint else {
+            syncStatus = AppLanguage.text("同步账号已更改，请重新同步。", "The sync account changed. Sync again.")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = AppLanguage.text("选择要保留的版本", "Choose the version to keep")
+        alert.informativeText = AppLanguage.text("所选版本保留为原便签；其他有内容的版本会保存为独立的冲突副本。", "The selected version keeps the original note. Other versions with content become separate conflict copies.")
+        for branch in conflict.branches {
+            let name = branch.title ?? AppLanguage.text("已删除", "Deleted")
+            let origin = branch.isLocal ? AppLanguage.text("本机", "This Mac") : AppLanguage.text("云端", "Cloud")
+            alert.addButton(withTitle: "\(origin): \(name) · \(branch.operationID.uuidString.prefix(6))")
+        }
+        alert.addButton(withTitle: AppLanguage.text("取消", "Cancel"))
+        let index = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        guard index >= 0 && index < conflict.branches.count else { return }
+        let selected = conflict.branches[index].operationID
+        Task { @MainActor in
+            guard !cloudSyncRunning, !automaticBackupRunning else { return }
+            cloudSyncRunning = true
+            defer { cloudSyncRunning = false; resumeClipboardCapture() }
+            do {
+                switch await drainClipboardWrites() {
+                case .completed: break
+                case .failed: throw ClipboardDrainFailure.failed
+                case .timedOut: throw ClipboardDrainFailure.timedOut
+                }
+                await windows.flushPendingWrites()
+                try await database.syncCaptureLocalChanges()
+                let currentEndpoint = (defaults.string(forKey: "webdavURL") ?? "") + "\n" + (defaults.string(forKey: "webdavUsername") ?? "")
+                guard windows.openCount == 0, defaults.bool(forKey: "webdavEnabled"),
+                      currentEndpoint == endpoint else { throw SyncError.unsavedChanges }
+                _ = try database.syncResolveConflictSynchronously(noteID: conflict.noteID,
+                    selectedVersion: selected, operations: pendingSyncOperations)
+                syncConflicts = []
+                pendingSyncOperations = []
+                pendingSyncEndpoint = nil
+                syncStatus = AppLanguage.text("已在本机保留各版本，请再次同步以发送结果。", "Versions were preserved locally. Sync again to upload the resolution.")
+            } catch {
+                syncStatus = error.localizedDescription
+            }
+        }
+    }
+
+    func requestCloudSync() {
+        Task { await performCloudSync(atStartup: false) }
+    }
+
+    private func performCloudSync(atStartup: Bool) async {
+        guard UserDefaults.standard.bool(forKey: "webdavEnabled"), !cloudSyncRunning, !automaticBackupRunning else { return }
+        cloudSyncRunning = true
+        var clipboardPaused = false
+        syncStatus = AppLanguage.text("正在同步…", "Syncing…")
+        defer {
+            cloudSyncRunning = false
+            if clipboardPaused { resumeClipboardCapture() }
+        }
+        do {
+            if !atStartup {
+                clipboardPaused = true
+                switch await drainClipboardWrites() {
+                case .completed: break
+                case .failed: throw ClipboardDrainFailure.failed
+                case .timedOut: throw ClipboardDrainFailure.timedOut
+                }
+                await windows.flushPendingWrites()
+            }
+            let defaults = UserDefaults.standard
+            guard let address = defaults.string(forKey: "webdavURL"), let url = URL(string: address),
+                  let username = defaults.string(forKey: "webdavUsername"),
+                  let password = try WebDAVCredentials.load() else { throw WebDAVError.invalidConfiguration }
+            let client = try WebDAVClient(configuration: WebDAVConfiguration(baseURL: url, username: username),
+                                           password: password)
+            try await database.syncCaptureLocalChanges()
+            if clipboardPaused {
+                resumeClipboardCapture()
+                clipboardPaused = false
+            }
+            try await client.verifyAuthentication()
+            let local = try await database.syncOperationIDs()
+            let localIDs = Set(local)
+            let names = try await client.list().filter { $0.hasPrefix("sync-op-") && $0.hasSuffix(".json") }
+            var remote: [SyncOperation] = []
+            var remoteIDs = Set<UUID>()
+            for name in names {
+                let rawID = String(name.dropFirst("sync-op-".count).dropLast(".json".count))
+                guard let id = UUID(uuidString: rawID), remoteIDs.insert(id).inserted else { throw SyncError.invalid }
+                let data = try await client.download(name: name)
+                if localIDs.contains(id) {
+                    guard try await database.syncOperationBytes(id: id) == data else { throw SyncError.invalid }
+                } else {
+                    let op = try JSONDecoder().decode(SyncOperation.self, from: data)
+                    guard op.id == id else { throw SyncError.invalid }
+                    remote.append(op)
+                }
+            }
+            for id in local {
+                if !remoteIDs.contains(id) {
+                    let data = try await database.syncOperationBytes(id: id)
+                    try await client.upload(name: "sync-op-\(id.uuidString).json", data: data)
+                }
+                try await database.syncMarkUploaded(ids: [id])
+            }
+            // This check and the synchronous transaction run together on the main actor.
+            // No note can be opened between the check and the write.
+            guard windows.openCount == 0 else {
+                syncStatus = AppLanguage.text("本地更改已上传；请关闭便签或重启应用以接收云端更改。", "Local changes uploaded; close notes or restart to receive cloud changes.")
+                return
+            }
+            if !atStartup {
+                clipboardPaused = true
+                switch await drainClipboardWrites() {
+                case .completed: break
+                case .failed: throw ClipboardDrainFailure.failed
+                case .timedOut: throw ClipboardDrainFailure.timedOut
+                }
+                await windows.flushPendingWrites()
+                try await database.syncCaptureLocalChanges()
+            }
+            guard windows.openCount == 0 else {
+                syncStatus = AppLanguage.text("请关闭便签或重启应用以接收云端更改。", "Close notes or restart to receive cloud changes.")
+                return
+            }
+            if !remote.isEmpty {
+                do {
+                    try database.syncApplyRemoteSynchronously(operations: remote)
+                    syncConflicts = []
+                    pendingSyncOperations = []
+                    pendingSyncEndpoint = nil
+                } catch SyncError.conflict {
+                    let conflicts = try await database.syncConflicts(operations: remote)
+                    guard !conflicts.isEmpty else { throw SyncError.conflict }
+                    pendingSyncOperations = remote
+                    pendingSyncEndpoint = address + "\n" + username
+                    syncConflicts = conflicts
+                    syncStatus = AppLanguage.text("发现 \(conflicts.count) 个冲突，请选择保留的版本。", "\(conflicts.count) conflict(s) need a version selection.")
+                    return
+                }
+            }
+            if try await database.syncPendingOperations().isEmpty {
+                syncStatus = AppLanguage.text("同步完成", "Sync complete")
+            } else {
+                syncStatus = AppLanguage.text("同步期间产生了新修改，将在下次同步时上传。", "New changes were made during sync and will upload on the next run.")
+            }
+        } catch {
+            syncStatus = error.localizedDescription
+            NSLog("[Tic] cloud sync failed: \(error)")
+        }
+    }
+}
+
+extension AppModel {
+    func requestAutomaticBackup() {
+        Task { await runAutomaticBackup() }
+    }
+
+    private func runAutomaticBackup() async {
+        guard UserDefaults.standard.bool(forKey: "automaticBackupEnabled"),
+              !cloudSyncRunning, !automaticBackupRunning else { return }
+        automaticBackupRunning = true
+        defer { automaticBackupRunning = false }
+        do {
+            if automaticBackup == nil {
+                let dir = try AppDatabase.supportDirectory().appendingPathComponent("Automatic Backups", isDirectory: true)
+                automaticBackup = AutoBackupService(directory: dir)
+            }
+            guard let automaticBackup else { return }
+            let result = try await automaticBackup.runIfDue(enabled: true, database: database, prepare: {
+                switch await self.drainClipboardWrites() {
+                case .completed: break
+                case .failed: throw ClipboardDrainFailure.failed
+                case .timedOut: throw ClipboardDrainFailure.timedOut
+                }
+                await self.windows.flushPendingWrites()
+                let defaults = UserDefaults.standard
+                return BackupPreferences(clipboardNoteID: self.clipboardNoteID?.uuidString,
+                                         clipboardCaptureEnabled: self.clipboardCaptureEnabled,
+                                         appLanguage: defaults.string(forKey: "appLanguage"),
+                                         newNoteColor: defaults.string(forKey: "newNoteColor"),
+                                         newNoteGlass: defaults.object(forKey: "newNoteGlass") as? Bool,
+                                         newNoteOpacity: defaults.object(forKey: "newNoteOpacity") as? Double,
+                                         newNotePinned: defaults.object(forKey: "newNotePinned") as? Bool,
+                                         newNoteHideCompleted: defaults.object(forKey: "newNoteHideCompleted") as? Bool)
+            }, finish: { self.resumeClipboardCapture() })
+            if case .created = result {
+                automaticBackupStatus = AppLanguage.text("已保存今日备份", "Today's backup is saved")
+            }
+        } catch {
+            automaticBackupStatus = error.localizedDescription
+            NSLog("[Tic] automatic backup failed: \(error)")
+        }
+    }
 }
 
 // Window presentation and application preferences.

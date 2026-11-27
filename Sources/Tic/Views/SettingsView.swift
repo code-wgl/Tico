@@ -4,13 +4,14 @@ import AppKit
 /// Native macOS sidebar and grouped forms for application preferences.
 struct SettingsView: View {
     private enum SettingsSection: String, CaseIterable, Identifiable {
-        case general, notes, clipboard, shortcuts, advanced, about
+        case general, notes, clipboard, sync, shortcuts, advanced, about
         var id: String { rawValue }
         var title: String {
             switch self {
             case .general: AppLanguage.text("通用", "General")
             case .notes: AppLanguage.text("便签", "Notes")
             case .clipboard: AppLanguage.text("剪贴板", "Clipboard")
+            case .sync: AppLanguage.text("云同步", "Cloud Sync")
             case .shortcuts: AppLanguage.text("键盘快捷键", "Keyboard Shortcuts")
             case .advanced: AppLanguage.text("高级", "Advanced")
             case .about: AppLanguage.text("关于", "About")
@@ -21,6 +22,7 @@ struct SettingsView: View {
             case .general: "gearshape.fill"
             case .notes: "note.text"
             case .clipboard: "doc.on.clipboard"
+            case .sync: "icloud"
             case .shortcuts: "keyboard"
             case .advanced: "slider.horizontal.3"
             case .about: "info.circle.fill"
@@ -31,6 +33,7 @@ struct SettingsView: View {
             case .general: .gray
             case .notes: .orange
             case .clipboard: .blue
+            case .sync: .blue
             case .shortcuts: .indigo
             case .advanced: .purple
             case .about: .teal
@@ -41,6 +44,7 @@ struct SettingsView: View {
             case .general: "language login 语言 登录 启动"
             case .notes: "color glass opacity pin default 颜色 毛玻璃 透明度 置顶 默认"
             case .clipboard: "copy capture note 复制 收集 便签"
+            case .sync: "cloud sync backup webdav 云 同步 备份"
             case .shortcuts: "keyboard shortcut 键盘 快捷键"
             case .advanced: "mcp agent 智能体 连接"
             case .about: "version 版本"
@@ -56,6 +60,7 @@ struct SettingsView: View {
     @AppStorage("newNoteOpacity") private var newOpacity = 1.0
     @AppStorage("newNotePinned") private var newPinned = false
     @AppStorage("newNoteHideCompleted") private var newHideCompleted = false
+    @AppStorage("automaticBackupEnabled") private var automaticBackupEnabled = false
     private var model: AppModel { .shared }
     private var shortcutStore: ShortcutStore { .shared }
     private var sections: [SettingsSection] {
@@ -97,6 +102,11 @@ struct SettingsView: View {
                         case .general: general
                         case .notes: notes
                         case .clipboard: clipboard
+                        case .sync:
+                            WebDAVSettingsView(status: model.syncStatus, onSync: { model.requestCloudSync() },
+                                               hasConflict: !model.syncConflicts.isEmpty,
+                                               onResolve: { model.resolveCloudConflict() })
+                            automaticBackupSection
                         case .shortcuts: shortcuts
                         case .advanced: advanced
                         case .about: about
@@ -141,8 +151,25 @@ struct SettingsView: View {
         switch selection ?? .general {
         case .general, .advanced, .clipboard: 155
         case .notes: 350
+        case .sync: 560
         case .shortcuts: 460
         case .about: 120
+        }
+    }
+
+    @ViewBuilder private var automaticBackupSection: some View {
+        Section {
+            Toggle(AppLanguage.text("每日自动备份", "Daily automatic backup"), isOn: $automaticBackupEnabled)
+                .onChange(of: automaticBackupEnabled) { _, enabled in
+                    if enabled { model.requestAutomaticBackup() }
+                }
+            Text(AppLanguage.text("保留最近 7 份，存放在 Tico 应用数据的 Automatic Backups 文件夹；文件未加密。", "Keeps the latest 7 copies in the Automatic Backups folder in Tico's application data. Files are not encrypted."))
+                .font(.caption).foregroundStyle(.secondary)
+            if let status = model.automaticBackupStatus {
+                Text(status).font(.caption).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text(AppLanguage.text("本地备份", "Local backups"))
         }
     }
 
@@ -151,6 +178,7 @@ struct SettingsView: View {
         case .general: AppLanguage.text("语言与启动设置", "Language and startup")
         case .notes: AppLanguage.text("新建便签的外观与行为", "Appearance and behavior for new notes")
         case .clipboard: AppLanguage.text("管理剪贴板内容收集", "Manage clipboard capture")
+        case .sync: AppLanguage.text("在设备之间同步便签", "Sync notes across devices")
         case .shortcuts: AppLanguage.text("自定义常用操作的快捷键", "Customize keyboard shortcuts")
         case .advanced: AppLanguage.text("连接本机智能体", "Connect local agents")
         case .about: AppLanguage.text("应用信息", "Application information")

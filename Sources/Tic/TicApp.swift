@@ -89,6 +89,8 @@ private struct MenuBarContent: View {
     var body: some View {
         Button("New List") { model.newNote() }
         Button(AppLanguage.text("导入便签…", "Import Note…")) { model.importNote() }
+        Button(AppLanguage.text("备份所有数据…", "Back Up All Data…")) { model.exportBackup() }
+        Button(AppLanguage.text("恢复备份为副本…", "Restore Backup as Copies…")) { model.restoreBackupCopies() }
         Button(AppLanguage.text("框选便签…", "Select Notes…")) { model.windows.selectNotesInArea() }
 
         Divider()
